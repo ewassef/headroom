@@ -44,6 +44,13 @@ from headroom.providers.claude import TOOL_SEARCH_DEFAULT, TOOL_SEARCH_ENV
 from headroom.providers.claude.runtime import TOOL_SEARCH_FOUNDRY_DEFAULT
 from headroom.providers.codex.install import codex_uses_chatgpt_auth
 from headroom.providers.codex.threads import retag_to_headroom
+from headroom.tool_policy import (
+    append_tool_policy_audit_event,
+    evaluate_shell_policy,
+    extract_hook_tool_request,
+    format_decision_reason,
+    load_tool_policy,
+)
 
 from .main import main
 
@@ -767,6 +774,81 @@ def _ensure_profile_running(profile: str) -> None:
             return
 
 
+def _hook_agent_from_marker(marker: str | None) -> str | None:
+    if marker == _CLAUDE_HOOK_MARKER:
+        return "claude"
+    if marker == _COPILOT_HOOK_MARKER:
+        return "copilot"
+    if marker == _CODEX_HOOK_MARKER:
+        return "codex"
+    return None
+
+
+def _read_hook_payload() -> dict[str, Any] | None:
+    try:
+        if sys.stdin.isatty():
+            return None
+    except Exception:
+        return None
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _hook_permission_output(agent: str, action: str, reason: str) -> dict[str, Any]:
+    if agent == "codex":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": action,
+                "permissionDecisionReason": reason,
+            }
+        }
+    return {
+        "permissionDecision": action,
+        "permissionDecisionReason": reason,
+        "reason": reason,
+    }
+
+
+def _maybe_emit_tool_policy_decision(marker: str | None, payload: dict[str, Any] | None) -> None:
+    agent = _hook_agent_from_marker(marker)
+    request = extract_hook_tool_request(payload)
+    if agent is None or request is None:
+        return
+    try:
+        policy = load_tool_policy(cwd=Path(request.cwd) if request.cwd else None)
+    except ValueError as exc:
+        sys.stdout.write(json.dumps(_hook_permission_output(agent, "deny", str(exc))))
+        sys.stdout.flush()
+        raise SystemExit(2) from exc
+    if policy is None:
+        return
+    decision = evaluate_shell_policy(
+        policy,
+        command_line=request.command_line,
+        cwd=request.cwd,
+        env=request.env,
+    )
+    if decision is None:
+        return
+    append_tool_policy_audit_event(decision, agent=agent, tool_name=request.tool_name)
+    if decision.effective_action == "allow":
+        return
+    permission = "ask" if decision.effective_action == "require_approval" else "deny"
+    sys.stdout.write(json.dumps(_hook_permission_output(agent, permission, format_decision_reason(decision))))
+    sys.stdout.flush()
+    raise SystemExit(2 if permission == "deny" else 0)
+
+
 def _probe_init_targets(global_scope: bool) -> list[tuple[str, str | None]]:
     """Return ``[(target, which_result)]`` for every in-scope supported target.
 
@@ -1103,7 +1185,6 @@ def init_hook() -> None:
 @click.option("--marker", default=None, hidden=True)
 def init_hook_ensure(profile: str | None, marker: str | None) -> None:
     """Best-effort ensure used by installed agent hooks."""
-    del marker
 
     def _has_manifest(name: str) -> bool:
         # Best-effort: a corrupt manifest must not crash the session-start hook.
@@ -1123,3 +1204,4 @@ def init_hook_ensure(profile: str | None, marker: str | None) -> None:
             profiles.append(_GLOBAL_PROFILE)
     for name in profiles:
         _ensure_profile_running(name)
+    _maybe_emit_tool_policy_decision(marker, _read_hook_payload())

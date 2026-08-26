@@ -10,6 +10,7 @@ import click
 if TYPE_CHECKING:
     from ..learn.base import LearnPlugin
 
+from ..learn.audit import append_learn_audit_event
 from .main import main
 
 
@@ -208,6 +209,38 @@ def learn(
 
     analyzer = SessionAnalyzer(model=resolved_model)
 
+    def _audit(
+        *,
+        agent_name: str,
+        project_path: Path,
+        status: str,
+        dry_run: bool,
+        result_data: Any | None = None,
+        file_map: dict[Path, str] | None = None,
+        warnings: list[str] | None = None,
+        analysis_error: str | None = None,
+        write_error: str | None = None,
+    ) -> None:
+        append_learn_audit_event(
+            agent=agent_name,
+            project_path=project_path,
+            model=resolved_model,
+            status=status,
+            dry_run=dry_run,
+            total_sessions=int(getattr(result_data, "total_sessions", 0) or 0),
+            total_calls=int(getattr(result_data, "total_calls", 0) or 0),
+            total_failures=int(getattr(result_data, "total_failures", 0) or 0),
+            recommendation_sections=[
+                str(getattr(rec, "section", ""))
+                for rec in (getattr(result_data, "recommendations", None) or [])
+                if str(getattr(rec, "section", "")).strip()
+            ],
+            files=file_map,
+            warnings=warnings,
+            analysis_error=analysis_error,
+            write_error=write_error,
+        )
+
     # Determine which agents to scan
     agent_configs: list[tuple[str, LearnPlugin]] = []
 
@@ -284,9 +317,22 @@ def learn(
                 # One unreadable agent/project must not abort the whole
                 # cross-agent run; skip it with a warning and continue.
                 click.echo(f"  Skipping (could not scan sessions): {exc}")
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="scan_error",
+                    dry_run=not apply,
+                    write_error=str(exc),
+                )
                 continue
             if not sessions:
                 click.echo("  No conversation data found.")
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="no_sessions",
+                    dry_run=not apply,
+                )
                 continue
 
             click.echo(f"  Analyzing with {resolved_model}...")
@@ -304,15 +350,37 @@ def learn(
             if analysis_error:
                 total_analysis_failures += 1
                 click.echo(f"  Analysis failed: {analysis_error}", err=True)
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="analysis_error",
+                    dry_run=not apply,
+                    result_data=result_data,
+                    analysis_error=str(analysis_error),
+                )
                 continue
 
             if result_data.failure_rate == 0 and not result_data.recommendations:
                 click.echo("  No failures or patterns found.")
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="no_patterns",
+                    dry_run=not apply,
+                    result_data=result_data,
+                )
                 continue
 
             recommendations = result_data.recommendations
             if not recommendations:
                 click.echo("  No actionable patterns found.")
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="no_recommendations",
+                    dry_run=not apply,
+                    result_data=result_data,
+                )
                 continue
 
             total_recommendations += len(recommendations)
@@ -323,6 +391,14 @@ def learn(
             except OSError as e:
                 click.echo(
                     f"  Warning: failed to write recommendations for {proj.project_path}: {e}"
+                )
+                _audit(
+                    agent_name=agent_name,
+                    project_path=proj.project_path,
+                    status="write_error",
+                    dry_run=not apply,
+                    result_data=result_data,
+                    write_error=str(e),
                 )
                 continue
 
@@ -340,6 +416,15 @@ def learn(
 
             if result.dry_run:
                 click.echo("\n  Dry run — use --apply to write.")
+            _audit(
+                agent_name=agent_name,
+                project_path=proj.project_path,
+                status="dry_run" if result.dry_run else "applied",
+                dry_run=result.dry_run,
+                result_data=result_data,
+                file_map=result.content_by_file,
+                warnings=list(getattr(result, "warnings", None) or []),
+            )
 
     if project and matched_projects == 0:
         click.echo(f"No project data found for {project.resolve()}")

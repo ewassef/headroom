@@ -282,6 +282,85 @@ def test_init_hook_ensure_prefers_local_profile(monkeypatch) -> None:
     assert ensured == ["init-repo-12345678"]
 
 
+def test_init_hook_ensure_denies_claude_bash_per_tool_policy(monkeypatch, tmp_path: Path) -> None:
+    init_cli, fake_main = _load_init_module(monkeypatch)
+    monkeypatch.setenv(
+        "HEADROOM_TOOL_POLICY_JSON",
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "id": "deny-curl",
+                        "scope": "shell",
+                        "action": "deny",
+                        "command": "curl",
+                        "reason": "centralized block",
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(init_cli, "load_manifest", lambda profile: None)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        fake_main,
+        ["init", "hook", "ensure", "--marker", init_cli._CLAUDE_HOOK_MARKER],
+        input=json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "curl https://example.com"},
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["permissionDecision"] == "deny"
+    assert "centralized block" in payload["permissionDecisionReason"]
+
+
+def test_init_hook_ensure_asks_codex_for_required_approval(monkeypatch, tmp_path: Path) -> None:
+    init_cli, fake_main = _load_init_module(monkeypatch)
+    monkeypatch.setenv(
+        "HEADROOM_TOOL_POLICY_JSON",
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "id": "approve-python",
+                        "scope": "shell",
+                        "action": "require_approval",
+                        "command": "python",
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(init_cli, "load_manifest", lambda profile: None)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        fake_main,
+        ["init", "hook", "ensure", "--marker", init_cli._CODEX_HOOK_MARKER],
+        input=json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "python manage.py shell"},
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert "python manage.py shell" in payload["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 def test_init_openclaw_requires_global(monkeypatch) -> None:
     _, fake_main = _load_init_module(monkeypatch)
     runner = CliRunner()

@@ -1,4 +1,5 @@
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -13,7 +14,10 @@ const BASE_URL_HEADER = "x-headroom-base-url";
 const ORIGINAL_PATH_HEADER = "x-headroom-original-path";
 const PROJECT_HEADER = "x-headroom-project";
 const PROXY_ENV = "HEADROOM_OPENCODE_TRANSPORT_PROXY_URL";
-export const TOOL_POLICY_ENV = "HEADROOM_OPENCODE_TOOL_POLICY_JSON";
+export const TOOL_POLICY_ENV = "HEADROOM_TOOL_POLICY_JSON";
+export const TOOL_POLICY_PATH_ENV = "HEADROOM_TOOL_POLICY_PATH";
+const LEGACY_TOOL_POLICY_ENV = "HEADROOM_OPENCODE_TOOL_POLICY_JSON";
+const TOOL_POLICY_FILE_NAME = "tool_policy.json";
 const STATE_KEY = Symbol.for("headroom.opencode.transport");
 
 type FetchArgs = Parameters<typeof fetch>;
@@ -87,6 +91,7 @@ interface TransportState {
   previousNodeOptions?: string;
   previousProxyUrlEnv?: string;
   previousToolPolicyEnv?: string;
+  previousLegacyToolPolicyEnv?: string;
   originalFetch: typeof fetch;
   originalHttpRequest: HttpRequest;
   originalHttpGet: HttpGet;
@@ -165,17 +170,83 @@ function withNodeImportOption(existing: string | undefined, shim: string): strin
   return parts.join(" ");
 }
 
-function loadToolPolicyConfig(policy: HeadroomToolPolicyInput | undefined): HeadroomToolPolicyConfig | undefined {
-  if (policy === undefined) {
-    const raw = process.env[TOOL_POLICY_ENV];
-    if (!raw?.trim()) {
+function parseToolPolicyJson(raw: string, source: string): HeadroomToolPolicyConfig {
+  try {
+    const parsed = JSON.parse(raw) as HeadroomToolPolicyConfig;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("expected a JSON object");
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(`Invalid Headroom tool policy JSON in ${source}: ${String(error)}`);
+  }
+}
+
+function readToolPolicyFile(filePath: string, source: string): HeadroomToolPolicyConfig {
+  try {
+    return parseToolPolicyJson(fs.readFileSync(filePath, "utf8"), source);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Invalid Headroom tool policy JSON")) {
+      throw error;
+    }
+    throw new Error(`Invalid Headroom tool policy file ${filePath} (${source}): ${String(error)}`);
+  }
+}
+
+function defaultGlobalToolPolicyPath(): string {
+  const explicitConfigDir = process.env.HEADROOM_CONFIG_DIR?.trim();
+  if (explicitConfigDir) {
+    return path.join(explicitConfigDir, TOOL_POLICY_FILE_NAME);
+  }
+  const explicitWorkspaceDir = process.env.HEADROOM_WORKSPACE_DIR?.trim();
+  if (explicitWorkspaceDir) {
+    return path.join(explicitWorkspaceDir, "config", TOOL_POLICY_FILE_NAME);
+  }
+  return path.join(os.homedir(), ".headroom", "config", TOOL_POLICY_FILE_NAME);
+}
+
+function findLocalToolPolicyPath(project: string | undefined): string | undefined {
+  const start = path.resolve(project || process.cwd());
+  let current = start;
+  while (true) {
+    const candidate = path.join(current, ".headroom", TOOL_POLICY_FILE_NAME);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
       return undefined;
     }
-    try {
-      return JSON.parse(raw) as HeadroomToolPolicyConfig;
-    } catch (error) {
-      throw new Error(`Invalid Headroom tool policy JSON in ${TOOL_POLICY_ENV}: ${String(error)}`);
+    current = parent;
+  }
+}
+
+function loadToolPolicyConfig(
+  policy: HeadroomToolPolicyInput | undefined,
+  project: string | undefined,
+): HeadroomToolPolicyConfig | undefined {
+  if (policy === undefined) {
+    const raw = process.env[TOOL_POLICY_ENV]?.trim();
+    if (raw) {
+      return parseToolPolicyJson(raw, TOOL_POLICY_ENV);
     }
+    const rawPath = process.env[TOOL_POLICY_PATH_ENV]?.trim();
+    if (rawPath) {
+      return readToolPolicyFile(rawPath, TOOL_POLICY_PATH_ENV);
+    }
+    const legacy = process.env[LEGACY_TOOL_POLICY_ENV]?.trim();
+    if (legacy) {
+      return parseToolPolicyJson(legacy, LEGACY_TOOL_POLICY_ENV);
+    }
+    const localPath = findLocalToolPolicyPath(project);
+    if (localPath) {
+      return readToolPolicyFile(localPath, localPath);
+    }
+    const globalPath = defaultGlobalToolPolicyPath();
+    if (fs.existsSync(globalPath)) {
+      return readToolPolicyFile(globalPath, globalPath);
+    }
+    return undefined;
   }
   if (typeof policy !== "string") {
     return policy;
@@ -185,17 +256,9 @@ function loadToolPolicyConfig(policy: HeadroomToolPolicyInput | undefined): Head
     return undefined;
   }
   if (trimmed.startsWith("{")) {
-    try {
-      return JSON.parse(trimmed) as HeadroomToolPolicyConfig;
-    } catch (error) {
-      throw new Error(`Invalid Headroom tool policy JSON string: ${String(error)}`);
-    }
+    return parseToolPolicyJson(trimmed, "inline string");
   }
-  try {
-    return JSON.parse(fs.readFileSync(trimmed, "utf8")) as HeadroomToolPolicyConfig;
-  } catch (error) {
-    throw new Error(`Invalid Headroom tool policy file ${trimmed}: ${String(error)}`);
-  }
+  return readToolPolicyFile(trimmed, trimmed);
 }
 
 function compileRegex(source: string | undefined, field: string, ruleId: string): RegExp | undefined {
@@ -218,8 +281,11 @@ function asArray(value: string | string[] | undefined): string[] | undefined {
   return Array.isArray(value) ? value : [value];
 }
 
-function compileToolPolicy(policy: HeadroomToolPolicyInput | undefined): CompiledToolPolicy | undefined {
-  const loaded = loadToolPolicyConfig(policy);
+function compileToolPolicy(
+  policy: HeadroomToolPolicyInput | undefined,
+  project: string | undefined,
+): CompiledToolPolicy | undefined {
+  const loaded = loadToolPolicyConfig(policy, project);
   if (!loaded) {
     return undefined;
   }
@@ -279,8 +345,10 @@ function withShimEnv(
   nextEnv[PROXY_ENV] = proxyUrl;
   if (toolPolicy) {
     nextEnv[TOOL_POLICY_ENV] = toolPolicy.serialized;
+    nextEnv[LEGACY_TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
     delete nextEnv[TOOL_POLICY_ENV];
+    delete nextEnv[LEGACY_TOOL_POLICY_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -293,8 +361,10 @@ function installProcessEnv(proxyUrl: string, toolPolicy: CompiledToolPolicy | un
   process.env[PROXY_ENV] = proxyUrl;
   if (toolPolicy) {
     process.env[TOOL_POLICY_ENV] = toolPolicy.serialized;
+    process.env[LEGACY_TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
     delete process.env[TOOL_POLICY_ENV];
+    delete process.env[LEGACY_TOOL_POLICY_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -838,7 +908,7 @@ function wrapHttp2Connect(originalConnect: Http2Connect): Http2Connect {
 
 export function installHeadroomTransport(options: InstallOptions): () => void {
   const existing = getState();
-  const toolPolicy = compileToolPolicy(options.toolPolicy);
+  const toolPolicy = compileToolPolicy(options.toolPolicy, options.project);
   if (existing) {
     existing.refs += 1;
     existing.proxyUrl = options.proxyUrl;
@@ -858,6 +928,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     previousNodeOptions: process.env.NODE_OPTIONS,
     previousProxyUrlEnv: process.env[PROXY_ENV],
     previousToolPolicyEnv: process.env[TOOL_POLICY_ENV],
+    previousLegacyToolPolicyEnv: process.env[LEGACY_TOOL_POLICY_ENV],
     originalFetch: globalThis.fetch,
     originalHttpRequest: http.request,
     originalHttpGet: http.get,
@@ -938,6 +1009,11 @@ export function uninstallHeadroomTransport(): void {
     delete process.env[TOOL_POLICY_ENV];
   } else {
     process.env[TOOL_POLICY_ENV] = state.previousToolPolicyEnv;
+  }
+  if (state.previousLegacyToolPolicyEnv === undefined) {
+    delete process.env[LEGACY_TOOL_POLICY_ENV];
+  } else {
+    process.env[LEGACY_TOOL_POLICY_ENV] = state.previousLegacyToolPolicyEnv;
   }
   setState(undefined);
 }

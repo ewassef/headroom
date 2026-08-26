@@ -3,6 +3,8 @@ import fs from "node:fs";
 import http from "node:http";
 import http2 from "node:http2";
 import https from "node:https";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { installHeadroomTransport, uninstallHeadroomTransport } from "./transport.js";
@@ -509,6 +511,57 @@ describe("Headroom OpenCode transport", () => {
       uninstallHeadroomTransport();
       stderrSpy.mockRestore();
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("loads policy from the nearest repo-local .headroom/tool_policy.json", () => {
+    const originalSpawn = childProcess.spawn;
+    const spawnMock = vi.fn(() => ({ on: vi.fn(), kill: vi.fn(), pid: 123 }));
+    childProcess.spawn = spawnMock as unknown as typeof childProcess.spawn;
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "headroom-policy-local-"));
+    const repoRoot = path.join(tmpRoot, "repo");
+    const nested = path.join(repoRoot, "src", "app");
+    fs.mkdirSync(path.join(repoRoot, ".headroom"), { recursive: true });
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(
+      path.join(repoRoot, ".headroom", "tool_policy.json"),
+      JSON.stringify({
+        rules: [{ id: "deny-curl", scope: "shell", action: "deny", command: "curl" }],
+      }),
+    );
+    try {
+      installHeadroomTransport({ proxyUrl: "http://127.0.0.1:8787/v1", project: nested });
+      expect(() => childProcess.spawn("curl", ["https://example.com"])).toThrow(/deny-curl/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      uninstallHeadroomTransport();
+      childProcess.spawn = originalSpawn;
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("loads policy from HEADROOM_TOOL_POLICY_PATH", () => {
+    const originalSpawn = childProcess.spawn;
+    const spawnMock = vi.fn(() => ({ on: vi.fn(), kill: vi.fn(), pid: 123 }));
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "headroom-policy-env-"));
+    const policyPath = path.join(tmpRoot, "tool-policy.json");
+    fs.writeFileSync(
+      policyPath,
+      JSON.stringify({
+        rules: [{ id: "deny-node", scope: "shell", action: "deny", command: "node" }],
+      }),
+    );
+    childProcess.spawn = spawnMock as unknown as typeof childProcess.spawn;
+    process.env.HEADROOM_TOOL_POLICY_PATH = policyPath;
+    try {
+      installHeadroomTransport({ proxyUrl: "http://127.0.0.1:8787/v1" });
+      expect(() => childProcess.spawn("node", ["script.js"])).toThrow(/deny-node/);
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      uninstallHeadroomTransport();
+      delete process.env.HEADROOM_TOOL_POLICY_PATH;
+      childProcess.spawn = originalSpawn;
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
 

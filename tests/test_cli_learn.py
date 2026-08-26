@@ -176,6 +176,36 @@ def test_learn_project_lookup_and_apply_flow(
     assert plugin.writer.calls[0][2] is False
 
 
+def test_learn_emits_audit_event_for_apply(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project-a"
+    project_path.mkdir()
+    matched = SimpleNamespace(name="project-a", project_path=project_path)
+    plugin = FakePlugin("codex", "Codex", [matched])
+    analyzer = FakeAnalyzer()
+    audit_events: list[dict[str, object]] = []
+
+    monkeypatch.setattr("headroom.learn.analyzer._detect_default_model", lambda: "gpt-4o")
+    monkeypatch.setattr("headroom.learn.registry.get_plugin", lambda name: plugin)
+    monkeypatch.setattr("headroom.learn.analyzer.SessionAnalyzer", lambda model=None: analyzer)
+    monkeypatch.setattr(
+        "headroom.cli.learn.append_learn_audit_event",
+        lambda **kwargs: audit_events.append(kwargs),
+    )
+
+    result = runner.invoke(
+        main,
+        ["learn", "--agent", "codex", "--project", str(project_path), "--apply"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert audit_events
+    assert audit_events[0]["agent"] == "codex"
+    assert audit_events[0]["status"] == "applied"
+
+
 def test_verbosity_all_apply_aggregates_baselines_across_projects(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:

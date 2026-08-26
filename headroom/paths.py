@@ -51,6 +51,7 @@ HEADROOM_SAVINGS_EVENTS_PATH_ENV = "HEADROOM_SAVINGS_EVENTS_PATH"
 HEADROOM_TOIN_PATH_ENV = "HEADROOM_TOIN_PATH"
 HEADROOM_SUBSCRIPTION_STATE_PATH_ENV = "HEADROOM_SUBSCRIPTION_STATE_PATH"
 HEADROOM_SETTINGS_PATH_ENV = "HEADROOM_SETTINGS_PATH"
+HEADROOM_LEARN_AUDIT_PATH_ENV = "HEADROOM_LEARN_AUDIT_PATH"
 
 # ---------------------------------------------------------------------------
 # Default sub-path fragments
@@ -70,6 +71,7 @@ _MEMORIES_DIR = "memories"
 _LICENSE_CACHE_FILE = "license_cache.json"
 _SESSION_STATS_FILE = "session_stats.jsonl"
 _SAVINGS_EVENTS_FILE = "savings_events.jsonl"
+_LEARN_AUDIT_FILE = "learn_audit.jsonl"
 _SYNC_STATE_FILE = "sync_state.json"
 _BRIDGE_STATE_FILE = "bridge_state.json"
 _LOGS_DIR = "logs"
@@ -279,6 +281,16 @@ def savings_events_path(explicit: str | os.PathLike[str] | None = None) -> Path:
         explicit,
         HEADROOM_SAVINGS_EVENTS_PATH_ENV,
         workspace_dir() / _SAVINGS_EVENTS_FILE,
+    )
+
+
+def learn_audit_path(explicit: str | os.PathLike[str] | None = None) -> Path:
+    """Return the durable append-only audit ledger for ``headroom learn``."""
+
+    return _resolve(
+        explicit,
+        HEADROOM_LEARN_AUDIT_PATH_ENV,
+        workspace_dir() / _LEARN_AUDIT_FILE,
     )
 
 

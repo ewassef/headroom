@@ -42,7 +42,7 @@ describe("HeadroomPlugin", () => {
       HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
       HEADROOM_PROJECT: "project-1",
       HEADROOM_BACKEND: "litellm",
-      HEADROOM_OPENCODE_TOOL_POLICY_JSON: JSON.stringify({
+      HEADROOM_TOOL_POLICY_JSON: JSON.stringify({
         mode: "enforce",
         defaultAction: "allow",
         rules: [{ id: "deny-curl", scope: "shell", action: "deny", command: "curl" }],
