@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import { createHeadroomRetrieveTool, getDefaultProxyUrl } from "./retrieve.js";
 import type { HeadroomToolPolicyConfig } from "./transport.js";
-import { installHeadroomTransport } from "./transport.js";
+import { installHeadroomTransport, TOOL_POLICY_ENV } from "./transport.js";
 
 export interface HeadroomOpenCodePluginOptions {
   proxyUrl?: string;
@@ -66,9 +66,8 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       if (pluginOptions.backend) {
         output.env.HEADROOM_BACKEND = pluginOptions.backend;
       }
-      if (process.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON) {
-        output.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON =
-          process.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON;
+      if (process.env[TOOL_POLICY_ENV]) {
+        output.env[TOOL_POLICY_ENV] = process.env[TOOL_POLICY_ENV];
       }
     },
   };

@@ -13,7 +13,7 @@ const BASE_URL_HEADER = "x-headroom-base-url";
 const ORIGINAL_PATH_HEADER = "x-headroom-original-path";
 const PROJECT_HEADER = "x-headroom-project";
 const PROXY_ENV = "HEADROOM_OPENCODE_TRANSPORT_PROXY_URL";
-const TOOL_POLICY_ENV = "HEADROOM_OPENCODE_TOOL_POLICY_JSON";
+export const TOOL_POLICY_ENV = "HEADROOM_OPENCODE_TOOL_POLICY_JSON";
 const STATE_KEY = Symbol.for("headroom.opencode.transport");
 
 type FetchArgs = Parameters<typeof fetch>;
@@ -171,7 +171,11 @@ function loadToolPolicyConfig(policy: HeadroomToolPolicyInput | undefined): Head
     if (!raw?.trim()) {
       return undefined;
     }
-    return JSON.parse(raw) as HeadroomToolPolicyConfig;
+    try {
+      return JSON.parse(raw) as HeadroomToolPolicyConfig;
+    } catch (error) {
+      throw new Error(`Invalid Headroom tool policy JSON in ${TOOL_POLICY_ENV}: ${String(error)}`);
+    }
   }
   if (typeof policy !== "string") {
     return policy;
@@ -181,9 +185,17 @@ function loadToolPolicyConfig(policy: HeadroomToolPolicyInput | undefined): Head
     return undefined;
   }
   if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed) as HeadroomToolPolicyConfig;
+    try {
+      return JSON.parse(trimmed) as HeadroomToolPolicyConfig;
+    } catch (error) {
+      throw new Error(`Invalid Headroom tool policy JSON string: ${String(error)}`);
+    }
   }
-  return JSON.parse(fs.readFileSync(trimmed, "utf8")) as HeadroomToolPolicyConfig;
+  try {
+    return JSON.parse(fs.readFileSync(trimmed, "utf8")) as HeadroomToolPolicyConfig;
+  } catch (error) {
+    throw new Error(`Invalid Headroom tool policy file ${trimmed}: ${String(error)}`);
+  }
 }
 
 function compileRegex(source: string | undefined, field: string, ruleId: string): RegExp | undefined {
