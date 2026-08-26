@@ -50,6 +50,7 @@ describe("HeadroomPlugin", () => {
       OPENAI_BASE_URL: "https://deepseek.example/v1",
       ANTHROPIC_BASE_URL: "https://anthropic.example",
     });
+    expect(output.env).not.toHaveProperty("HEADROOM_OPENCODE_TOOL_POLICY_JSON");
   });
 
   it("exposes a headroom_retrieve tool backed by the proxy", async () => {

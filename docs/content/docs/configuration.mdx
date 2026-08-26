@@ -175,6 +175,91 @@ Matching is on the parsed hostname and is exact — no wildcards — so
 `api.anthropic.com.evil.example` and `https://api.anthropic.com@evil.example`
 do not match `api.anthropic.com`.
 
+## Cross-Agent Tool Policy
+
+Headroom can apply one shared pre-execution policy across OpenCode, Claude Code, GitHub Copilot CLI, and Codex integrations.
+
+Resolution order is always:
+
+1. `HEADROOM_TOOL_POLICY_JSON`
+2. `HEADROOM_TOOL_POLICY_PATH`
+3. nearest repo-local `.headroom/tool_policy.json`
+4. `~/.headroom/config/tool_policy.json`
+
+Use a centralized policy when one operator or workstation should control every wrapped agent:
+
+```bash
+export HEADROOM_TOOL_POLICY_PATH=~/.headroom/config/tool_policy.json
+```
+
+```json title="~/.headroom/config/tool_policy.json"
+{
+  "mode": "enforce",
+  "defaultAction": "allow",
+  "rules": [
+    {
+      "id": "deny-direct-provider-egress",
+      "scope": "http",
+      "action": "deny",
+      "domain": ["api.openai.com", "api.anthropic.com"],
+      "reason": "route model traffic through approved gateways"
+    },
+    {
+      "id": "ask-before-push",
+      "scope": "shell",
+      "action": "require_approval",
+      "command": "git",
+      "argsPattern": "\\bpush\\b"
+    }
+  ]
+}
+```
+
+Use a repo-local policy when the rules belong to the project itself:
+
+```json title=".headroom/tool_policy.json"
+{
+  "mode": "enforce",
+  "rules": [
+    {
+      "id": "deny-curl-posts",
+      "scope": "shell",
+      "action": "deny",
+      "command": "curl",
+      "argsPattern": "\\b-X\\s+POST\\b"
+    },
+    {
+      "id": "audit-python",
+      "scope": "shell",
+      "action": "deny",
+      "command": "python"
+    }
+  ]
+}
+```
+
+Supported rule fields:
+
+| Field | Applies to | Purpose |
+|---|---|---|
+| `scope` | all rules | `shell`, `http`, or `tool_call` |
+| `action` | all rules | `allow`, `deny`, or `require_approval` |
+| `command` | shell/tool_call | Match command name or executable path |
+| `argsPattern` | shell/tool_call | Regex over the shell command line |
+| `cwdPattern` | shell/tool_call | Regex over the working directory |
+| `envKeys` | shell/tool_call | Match when env keys are present |
+| `domain` | http/tool_call | Match HTTP hostname |
+| `urlPattern` | http/tool_call | Regex over the full URL |
+| `reason` | all rules | Human-readable audit context |
+
+Notes:
+
+- First matching rule wins.
+- `defaultAction` defaults to `allow` and may be set to `deny`.
+- `mode: "report_only"` records the decision but allows the action.
+- Hook-based agents append audit lines to `~/.headroom/tool_policy_audit.jsonl`.
+- OpenCode enforces the same policy for in-process HTTP and shell interception. `require_approval` currently fails closed there because OpenCode does not expose an interactive approval callback yet.
+
 ## SmartCrusher Configuration
 
 Fine-tune JSON compression behavior:

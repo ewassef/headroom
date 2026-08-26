@@ -16,7 +16,6 @@ const PROJECT_HEADER = "x-headroom-project";
 const PROXY_ENV = "HEADROOM_OPENCODE_TRANSPORT_PROXY_URL";
 export const TOOL_POLICY_ENV = "HEADROOM_TOOL_POLICY_JSON";
 export const TOOL_POLICY_PATH_ENV = "HEADROOM_TOOL_POLICY_PATH";
-const LEGACY_TOOL_POLICY_ENV = "HEADROOM_OPENCODE_TOOL_POLICY_JSON";
 const TOOL_POLICY_FILE_NAME = "tool_policy.json";
 const STATE_KEY = Symbol.for("headroom.opencode.transport");
 
@@ -91,7 +90,6 @@ interface TransportState {
   previousNodeOptions?: string;
   previousProxyUrlEnv?: string;
   previousToolPolicyEnv?: string;
-  previousLegacyToolPolicyEnv?: string;
   originalFetch: typeof fetch;
   originalHttpRequest: HttpRequest;
   originalHttpGet: HttpGet;
@@ -234,10 +232,6 @@ function loadToolPolicyConfig(
     if (rawPath) {
       return readToolPolicyFile(rawPath, TOOL_POLICY_PATH_ENV);
     }
-    const legacy = process.env[LEGACY_TOOL_POLICY_ENV]?.trim();
-    if (legacy) {
-      return parseToolPolicyJson(legacy, LEGACY_TOOL_POLICY_ENV);
-    }
     const localPath = findLocalToolPolicyPath(project);
     if (localPath) {
       return readToolPolicyFile(localPath, localPath);
@@ -345,10 +339,8 @@ function withShimEnv(
   nextEnv[PROXY_ENV] = proxyUrl;
   if (toolPolicy) {
     nextEnv[TOOL_POLICY_ENV] = toolPolicy.serialized;
-    nextEnv[LEGACY_TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
     delete nextEnv[TOOL_POLICY_ENV];
-    delete nextEnv[LEGACY_TOOL_POLICY_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -361,10 +353,8 @@ function installProcessEnv(proxyUrl: string, toolPolicy: CompiledToolPolicy | un
   process.env[PROXY_ENV] = proxyUrl;
   if (toolPolicy) {
     process.env[TOOL_POLICY_ENV] = toolPolicy.serialized;
-    process.env[LEGACY_TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
     delete process.env[TOOL_POLICY_ENV];
-    delete process.env[LEGACY_TOOL_POLICY_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -928,7 +918,6 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     previousNodeOptions: process.env.NODE_OPTIONS,
     previousProxyUrlEnv: process.env[PROXY_ENV],
     previousToolPolicyEnv: process.env[TOOL_POLICY_ENV],
-    previousLegacyToolPolicyEnv: process.env[LEGACY_TOOL_POLICY_ENV],
     originalFetch: globalThis.fetch,
     originalHttpRequest: http.request,
     originalHttpGet: http.get,
@@ -1009,11 +998,6 @@ export function uninstallHeadroomTransport(): void {
     delete process.env[TOOL_POLICY_ENV];
   } else {
     process.env[TOOL_POLICY_ENV] = state.previousToolPolicyEnv;
-  }
-  if (state.previousLegacyToolPolicyEnv === undefined) {
-    delete process.env[LEGACY_TOOL_POLICY_ENV];
-  } else {
-    process.env[LEGACY_TOOL_POLICY_ENV] = state.previousLegacyToolPolicyEnv;
   }
   setState(undefined);
 }

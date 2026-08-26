@@ -55,7 +55,7 @@ export default async function plugin(input) {
 - can enforce optional pre-execution shell/HTTP policy rules in the transport layer.
 - defaults to `http://127.0.0.1:8787` when no proxy URL is supplied.
 
-### Tool policy enforcement (MVP)
+### Tool policy enforcement
 
 Pass `toolPolicy` to `HeadroomPlugin` (or set `HEADROOM_TOOL_POLICY_JSON`) to preflight outbound HTTP requests and child-process shell launches before they execute.
 
@@ -87,16 +87,65 @@ export default async function plugin(input) {
 }
 ```
 
-Current MVP behavior:
+You can also keep the policy outside the plugin code:
+
+```bash
+export HEADROOM_TOOL_POLICY_PATH=~/.headroom/config/tool_policy.json
+```
+
+Or commit a repo-local policy file:
+
+```text
+<repo>/.headroom/tool_policy.json
+```
+
+```json
+{
+  "mode": "enforce",
+  "defaultAction": "allow",
+  "rules": [
+    {
+      "id": "deny-direct-openai",
+      "scope": "http",
+      "action": "deny",
+      "domain": "api.openai.com",
+      "reason": "force egress through approved gateways"
+    },
+    {
+      "id": "ask-before-curl-post",
+      "scope": "shell",
+      "action": "require_approval",
+      "command": "curl",
+      "argsPattern": "\\b-X\\s+POST\\b"
+    }
+  ]
+}
+```
+
+Behavior:
 
 - scopes: `shell`, `http`, and cross-cutting `tool_call`
 - actions: `allow`, `deny`, `require_approval`
+- control precedence: `HEADROOM_TOOL_POLICY_JSON` → `HEADROOM_TOOL_POLICY_PATH` → nearest repo `.headroom/tool_policy.json` → `~/.headroom/config/tool_policy.json`
 - deterministic precedence: first matching rule wins
 - matchers: `command`, `argsPattern`, `cwdPattern`, `envKeys`, `domain`, `urlPattern`
 - `report_only` mode logs the decision but allows the operation
 - decisions are emitted as structured JSON lines on stderr with `event="headroom_tool_policy_decision"`
 
 `require_approval` currently fails closed in the OpenCode transport because there is no interactive approval callback yet.
+
+Example audit line:
+
+```json
+{
+  "event": "headroom_tool_policy_decision",
+  "scope": "http",
+  "action": "deny",
+  "effective_action": "deny",
+  "matched_rule": "deny-direct-openai",
+  "resource": "https://api.openai.com/v1/responses"
+}
+```
 
 ## Retrieve Tool
 
@@ -145,7 +194,7 @@ The provider config exposes these as `headroom/<model>` and defaults to `headroo
 |---|---|---|
 | `HEADROOM_PROXY_URL` | Native plugin | Proxy URL used by `HeadroomPlugin` |
 | `OPENCODE_CONFIG_CONTENT` | OpenCode wrapper | Generated OpenCode provider, model, and MCP config |
-| `HEADROOM_TOOL_POLICY_JSON` | Native plugin / child Node processes | Optional JSON policy document for pre-exec shell + HTTP checks (`HEADROOM_OPENCODE_TOOL_POLICY_JSON` is still accepted for backward compatibility) |
+| `HEADROOM_TOOL_POLICY_JSON` | Native plugin / child Node processes | Optional JSON policy document for pre-exec shell + HTTP checks |
 | `HEADROOM_TOOL_POLICY_PATH` | Native plugin / child Node processes | Optional path to a shared JSON policy file; falls back to repo-local `.headroom/tool_policy.json` or `~/.headroom/config/tool_policy.json` when unset |
 
 ## License

@@ -104,6 +104,58 @@ team-shared `CLAUDE.md`, the next `headroom learn --apply` moves it into
 committing. If `CLAUDE.md` contained nothing but the Headroom block, it is
 removed entirely.
 
+## Learn Audit Trail
+
+Every `headroom learn` run now appends a structured audit record to `~/.headroom/learn_audit.jsonl`. Set `HEADROOM_LEARN_AUDIT_PATH` when you need the log elsewhere.
+
+The audit stream is append-only and records:
+
+- agent and project path
+- model used for analysis
+- run status (`applied`, `dry_run`, `analysis_failed`, `write_failed`, `no_sessions`, and similar outcomes)
+- whether the run was dry-run or apply
+- total sessions, tool calls, and failures analyzed
+- recommendation section names
+- written files with content hash and byte size
+- warnings and captured error messages
+
+Example dry-run:
+
+```bash
+headroom learn --agent opencode
+```
+
+Example apply run:
+
+```bash
+headroom learn --agent opencode --apply
+```
+
+Example audit record:
+
+```json
+{
+  "event": "headroom_learn_audit",
+  "agent": "opencode",
+  "project_path": "/workspace/headroom",
+  "status": "applied",
+  "dry_run": false,
+  "total_sessions": 12,
+  "total_calls": 481,
+  "total_failures": 39,
+  "recommendation_sections": ["Environment", "Command Patterns"],
+  "files": [
+    {
+      "path": "/workspace/headroom/CLAUDE.local.md",
+      "content_sha256": "4f29aa0c9cbad1d2",
+      "bytes": 1824
+    }
+  ]
+}
+```
+
+Use this file when you need to audit what the learning module observed, whether a run was only simulated, and exactly which outputs were written.
+
 ## Marker-Based Updates
 
 Headroom manages a clearly-delimited section in each file:
