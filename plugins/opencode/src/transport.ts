@@ -338,9 +338,9 @@ function shellCommandBinary(commandLine: string): string {
   if (!trimmed) {
     return "";
   }
-  const quoted = trimmed.match(/^["']([^"']+)["']/);
-  if (quoted?.[1]) {
-    return quoted[1];
+  const quoted = trimmed.match(/^(["'])([^"']+)\1/);
+  if (quoted?.[2]) {
+    return quoted[2];
   }
   return trimmed.split(/\s+/, 1)[0] ?? "";
 }

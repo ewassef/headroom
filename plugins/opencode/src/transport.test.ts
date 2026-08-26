@@ -420,28 +420,30 @@ describe("Headroom OpenCode transport", () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      installHeadroomTransport({
+        proxyUrl: "http://127.0.0.1:8787/v1",
+        toolPolicy: {
+          rules: [
+            {
+              id: "deny-openai",
+              scope: "http",
+              action: "deny",
+              domain: "api.openai.com",
+              reason: "direct egress not approved",
+            },
+          ],
+        },
+      });
 
-    installHeadroomTransport({
-      proxyUrl: "http://127.0.0.1:8787/v1",
-      toolPolicy: {
-        rules: [
-          {
-            id: "deny-openai",
-            scope: "http",
-            action: "deny",
-            domain: "api.openai.com",
-            reason: "direct egress not approved",
-          },
-        ],
-      },
-    });
-
-    await expect(fetch("https://api.openai.com/v1/responses", { method: "POST" })).rejects.toThrow(
-      /rule=deny-openai/,
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    globalThis.fetch = originalFetch;
+      await expect(fetch("https://api.openai.com/v1/responses", { method: "POST" })).rejects.toThrow(
+        /rule=deny-openai/,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      uninstallHeadroomTransport();
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("surfaces require_approval shell decisions as a hard block", () => {
@@ -469,6 +471,7 @@ describe("Headroom OpenCode transport", () => {
       );
       expect(spawnMock).not.toHaveBeenCalled();
     } finally {
+      uninstallHeadroomTransport();
       childProcess.spawn = originalSpawn;
     }
   });
@@ -478,32 +481,34 @@ describe("Headroom OpenCode transport", () => {
     const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      installHeadroomTransport({
+        proxyUrl: "http://127.0.0.1:8787/v1",
+        toolPolicy: {
+          mode: "report_only",
+          rules: [
+            {
+              id: "report-http",
+              scope: "http",
+              action: "deny",
+              domain: "*.example.com",
+              reason: "dry run",
+            },
+          ],
+        },
+      });
 
-    installHeadroomTransport({
-      proxyUrl: "http://127.0.0.1:8787/v1",
-      toolPolicy: {
-        mode: "report_only",
-        rules: [
-          {
-            id: "report-http",
-            scope: "http",
-            action: "deny",
-            domain: "*.example.com",
-            reason: "dry run",
-          },
-        ],
-      },
-    });
+      await fetch("https://api.example.com/v1/messages", { method: "POST" });
 
-    await fetch("https://api.example.com/v1/messages", { method: "POST" });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('"effective_action":"allow"'),
-    );
-    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('"matched_rule":"report-http"'));
-
-    globalThis.fetch = originalFetch;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"effective_action":"allow"'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('"matched_rule":"report-http"'));
+    } finally {
+      uninstallHeadroomTransport();
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("sends x-headroom-project header on routed Node https.request calls when project is set", async () => {
