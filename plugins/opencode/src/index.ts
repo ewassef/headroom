@@ -21,3 +21,10 @@ export { HeadroomPlugin, default } from "./plugin.js";
 export type { HeadroomOpenCodePluginOptions } from "./plugin.js";
 
 export { installHeadroomTransport } from "./transport.js";
+export type {
+  HeadroomToolPolicyConfig,
+  HeadroomToolPolicyRule,
+  ToolPolicyAction,
+  ToolPolicyMode,
+  ToolPolicyScope,
+} from "./transport.js";

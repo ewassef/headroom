@@ -3,6 +3,7 @@ import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 
 import { createHeadroomRetrieveTool, getDefaultProxyUrl } from "./retrieve.js";
+import type { HeadroomToolPolicyConfig } from "./transport.js";
 import { installHeadroomTransport } from "./transport.js";
 
 export interface HeadroomOpenCodePluginOptions {
@@ -10,6 +11,7 @@ export interface HeadroomOpenCodePluginOptions {
   project?: string;
   backend?: string;
   debug?: boolean;
+  toolPolicy?: HeadroomToolPolicyConfig | string;
 }
 
 function normalizeProxyUrl(url: string): string {
@@ -37,6 +39,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     proxyUrl,
     project,
     debug: pluginOptions.debug,
+    toolPolicy: pluginOptions.toolPolicy,
   });
 
   return {
@@ -62,6 +65,10 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       output.env.HEADROOM_PROJECT = project;
       if (pluginOptions.backend) {
         output.env.HEADROOM_BACKEND = pluginOptions.backend;
+      }
+      if (process.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON) {
+        output.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON =
+          process.env.HEADROOM_OPENCODE_TOOL_POLICY_JSON;
       }
     },
   };

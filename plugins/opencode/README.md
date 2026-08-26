@@ -52,7 +52,51 @@ export default async function plugin(input) {
 - installs Headroom transport interception for OpenCode provider traffic.
 - exposes the `headroom_retrieve` tool.
 - publishes `HEADROOM_PROXY_URL` in the plugin output env.
+- can enforce optional pre-execution shell/HTTP policy rules in the transport layer.
 - defaults to `http://127.0.0.1:8787` when no proxy URL is supplied.
+
+### Tool policy enforcement (MVP)
+
+Pass `toolPolicy` to `HeadroomPlugin` (or set `HEADROOM_OPENCODE_TOOL_POLICY_JSON`) to preflight outbound HTTP requests and child-process shell launches before they execute.
+
+```ts
+import { HeadroomPlugin } from "headroom-opencode";
+
+export default async function plugin(input) {
+  return HeadroomPlugin(input, {
+    proxyUrl: "http://127.0.0.1:8787",
+    toolPolicy: {
+      mode: "enforce",
+      rules: [
+        {
+          id: "deny-direct-openai",
+          scope: "http",
+          action: "deny",
+          domain: "api.openai.com",
+          reason: "force egress through approved gateways",
+        },
+        {
+          id: "approve-curl",
+          scope: "shell",
+          action: "require_approval",
+          command: "curl",
+        },
+      ],
+    },
+  });
+}
+```
+
+Current MVP behavior:
+
+- scopes: `shell`, `http`, and cross-cutting `tool_call`
+- actions: `allow`, `deny`, `require_approval`
+- deterministic precedence: first matching rule wins
+- matchers: `command`, `argsPattern`, `cwdPattern`, `envKeys`, `domain`, `urlPattern`
+- `report_only` mode logs the decision but allows the operation
+- decisions are emitted as structured JSON lines on stderr with `event="headroom_tool_policy_decision"`
+
+`require_approval` currently fails closed in the OpenCode transport because there is no interactive approval callback yet.
 
 ## Retrieve Tool
 
@@ -101,6 +145,7 @@ The provider config exposes these as `headroom/<model>` and defaults to `headroo
 |---|---|---|
 | `HEADROOM_PROXY_URL` | Native plugin | Proxy URL used by `HeadroomPlugin` |
 | `OPENCODE_CONFIG_CONTENT` | OpenCode wrapper | Generated OpenCode provider, model, and MCP config |
+| `HEADROOM_OPENCODE_TOOL_POLICY_JSON` | Native plugin / child Node processes | Optional JSON policy document for pre-exec shell + HTTP checks |
 
 ## License
 
