@@ -7,6 +7,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -205,10 +206,10 @@ def load_tool_policy(
         )
     raw_path = env.get(TOOL_POLICY_PATH_ENV, "").strip()
     if raw_path:
-        path = Path(raw_path).expanduser()
+        policy_path = Path(raw_path).expanduser()
         return _compile_loaded_policy(
-            _load_json_file(path, source=f"{TOOL_POLICY_PATH_ENV}={path}"),
-            source=f"path:{path}",
+            _load_json_file(policy_path, source=f"{TOOL_POLICY_PATH_ENV}={policy_path}"),
+            source=f"path:{policy_path}",
         )
     local_path = discover_local_tool_policy_path(cwd)
     if local_path is not None:
@@ -345,7 +346,7 @@ def append_tool_policy_audit_event(
         return
     record = {
         "event": "headroom_tool_policy_decision",
-        "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "agent": agent,
         "tool_name": tool_name,
         "scope": decision.scope,

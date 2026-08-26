@@ -69,7 +69,8 @@ The default model is `headroom/claude-sonnet-4-6`. Change it in `opencode.json` 
 |---|---|
 | `OPENCODE_CONFIG_CONTENT` | JSON payload with provider, plugin, and optional local MCP config injected by `wrap` |
 | `HEADROOM_PROXY_URL` | Proxy URL passed to Headroom MCP when a non-default port is used, and to the native plugin when configured |
-| `HEADROOM_OPENCODE_TOOL_POLICY_JSON` | Optional JSON policy for pre-exec shell + HTTP enforcement in the native plugin transport |
+| `HEADROOM_TOOL_POLICY_JSON` | Optional JSON policy for pre-exec shell + HTTP enforcement in the native plugin transport (`HEADROOM_OPENCODE_TOOL_POLICY_JSON` remains accepted for backward compatibility) |
+| `HEADROOM_TOOL_POLICY_PATH` | Optional path to a shared JSON policy file; when unset the plugin also checks repo-local `.headroom/tool_policy.json` and `~/.headroom/config/tool_policy.json` |
 
 ## Failure Learning
 

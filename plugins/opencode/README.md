@@ -57,7 +57,7 @@ export default async function plugin(input) {
 
 ### Tool policy enforcement (MVP)
 
-Pass `toolPolicy` to `HeadroomPlugin` (or set `HEADROOM_OPENCODE_TOOL_POLICY_JSON`) to preflight outbound HTTP requests and child-process shell launches before they execute.
+Pass `toolPolicy` to `HeadroomPlugin` (or set `HEADROOM_TOOL_POLICY_JSON`) to preflight outbound HTTP requests and child-process shell launches before they execute.
 
 ```ts
 import { HeadroomPlugin } from "headroom-opencode";
@@ -145,7 +145,8 @@ The provider config exposes these as `headroom/<model>` and defaults to `headroo
 |---|---|---|
 | `HEADROOM_PROXY_URL` | Native plugin | Proxy URL used by `HeadroomPlugin` |
 | `OPENCODE_CONFIG_CONTENT` | OpenCode wrapper | Generated OpenCode provider, model, and MCP config |
-| `HEADROOM_OPENCODE_TOOL_POLICY_JSON` | Native plugin / child Node processes | Optional JSON policy document for pre-exec shell + HTTP checks |
+| `HEADROOM_TOOL_POLICY_JSON` | Native plugin / child Node processes | Optional JSON policy document for pre-exec shell + HTTP checks (`HEADROOM_OPENCODE_TOOL_POLICY_JSON` is still accepted for backward compatibility) |
+| `HEADROOM_TOOL_POLICY_PATH` | Native plugin / child Node processes | Optional path to a shared JSON policy file; falls back to repo-local `.headroom/tool_policy.json` or `~/.headroom/config/tool_policy.json` when unset |
 
 ## License
 
