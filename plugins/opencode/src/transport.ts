@@ -112,7 +112,7 @@ interface NodeRequestParts {
 interface PolicyDecisionBase {
   scope: "shell" | "http";
   action: ToolPolicyAction;
-  effectiveAction: ToolPolicyAction | "allow";
+  effectiveAction: ToolPolicyAction;
   mode: ToolPolicyMode;
   matchedRuleId?: string;
   reason?: string;

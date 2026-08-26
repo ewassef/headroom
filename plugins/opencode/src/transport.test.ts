@@ -507,6 +507,7 @@ describe("Headroom OpenCode transport", () => {
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('"matched_rule":"report-http"'));
     } finally {
       uninstallHeadroomTransport();
+      stderrSpy.mockRestore();
       globalThis.fetch = originalFetch;
     }
   });
