@@ -41,7 +41,7 @@ Example machine-level policy:
       "scope": "shell",
       "action": "deny",
       "command": "curl",
-      "argsPattern": "\\b-X\\s+POST\\b"
+      "argsPattern": "(^|\\s)-X\\s+POST\\b"
     }
   ]
 }

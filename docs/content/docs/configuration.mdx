@@ -232,7 +232,7 @@ Use a repo-local policy when the rules belong to the project itself:
       "scope": "shell",
       "action": "deny",
       "command": "curl",
-      "argsPattern": "\\b-X\\s+POST\\b"
+      "argsPattern": "(^|\\s)-X\\s+POST\\b"
     },
     {
       "id": "audit-python",
