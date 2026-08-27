@@ -183,8 +183,12 @@ Resolution order is always:
 
 1. `HEADROOM_TOOL_POLICY_JSON`
 2. `HEADROOM_TOOL_POLICY_PATH`
-3. nearest repo-local `.headroom/tool_policy.json`
+3. `HEADROOM_TOOL_POLICY_URL`
 4. `~/.headroom/config/tool_policy.json`
+5. nearest repo-local `.headroom/tool_policy.json`
+
+Explicit and machine-level sources are authoritative over repository policy, so
+a checkout cannot weaken workstation controls.
 
 Use a centralized policy when one operator or workstation should control every wrapped agent:
 
@@ -194,6 +198,7 @@ export HEADROOM_TOOL_POLICY_PATH=~/.headroom/config/tool_policy.json
 
 ```json title="~/.headroom/config/tool_policy.json"
 {
+  "version": 1,
   "mode": "enforce",
   "defaultAction": "allow",
   "rules": [
@@ -219,6 +224,7 @@ Use a repo-local policy when the rules belong to the project itself:
 
 ```json title=".headroom/tool_policy.json"
 {
+  "version": 1,
   "mode": "enforce",
   "rules": [
     {
@@ -244,6 +250,7 @@ Supported rule fields:
 |---|---|---|
 | `scope` | all rules | `shell`, `http`, or `tool_call` |
 | `action` | all rules | `allow`, `deny`, or `require_approval` |
+| `tool` | tool_call | Match the native agent tool name |
 | `command` | shell/tool_call | Match command name or executable path |
 | `argsPattern` | shell/tool_call | Regex over the shell command line |
 | `cwdPattern` | shell/tool_call | Regex over the working directory |
@@ -258,7 +265,33 @@ Notes:
 - `defaultAction` defaults to `allow` and may be set to `deny`.
 - `mode: "report_only"` records the decision but allows the action.
 - Hook-based agents append audit lines to `~/.headroom/tool_policy_audit.jsonl`.
-- OpenCode enforces the same policy for in-process HTTP and shell interception. `require_approval` currently fails closed there because OpenCode does not expose an interactive approval callback yet.
+- OpenCode evaluates native tool calls and also retains in-process HTTP and child-process interception as defense in depth.
+- `require_approval` prompts where the host supports it. OpenCode and current Codex `PreToolUse` hooks fail closed because they cannot escalate to an interactive approval.
+
+### Remote policy service
+
+Set `HEADROOM_TOOL_POLICY_URL` to fetch the same versioned JSON document from a
+central service:
+
+```bash
+export HEADROOM_TOOL_POLICY_URL=https://policy.example.com/v1/headroom
+export HEADROOM_TOOL_POLICY_TOKEN="$POLICY_READ_TOKEN" # optional bearer token
+```
+
+The client sends `Accept: application/json`, uses `ETag` /
+`If-None-Match` revalidation, and shares an atomic cache under
+`~/.headroom/policy-cache/`. Cache identity includes the endpoint and a
+one-way credential binding, so changing bearer credentials cannot reuse another
+tenant's cached policy. The default refresh interval is five minutes.
+`HEADROOM_TOOL_POLICY_REFRESH_SECONDS` may extend it from `300` through `3600`;
+invalid, shorter, or larger values revert to `300`.
+
+Once a cached policy expires, a network error, invalid response, or non-success
+status fails closed until a valid policy is available. Plain HTTP is rejected
+except for loopback development services, and redirects are rejected so bearer
+credentials cannot cross origins or downgrade transport. Treat the optional
+bearer token as a least-privilege, read-only credential because local agent
+processes share the user's environment.
 
 ## SmartCrusher Configuration
 

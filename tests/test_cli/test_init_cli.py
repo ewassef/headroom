@@ -252,9 +252,9 @@ def test_init_copilot_global_writes_hooks_and_env(monkeypatch, tmp_path: Path) -
     init_cli._init_copilot(global_scope=True, profile="init-user", port=9005, backend="openai")
 
     payload = json.loads((tmp_path / "copilot-config.json").read_text(encoding="utf-8"))
-    assert "SessionStart" in payload["hooks"]
-    assert "PreToolUse" in payload["hooks"]
-    assert "--profile init-user" in payload["hooks"]["SessionStart"][0]["command"]
+    assert "sessionStart" in payload["hooks"]
+    assert "preToolUse" in payload["hooks"]
+    assert "--profile init-user" in payload["hooks"]["sessionStart"][0]["command"]
     assert captured_env == {
         "COPILOT_PROVIDER_TYPE": "openai",
         "COPILOT_PROVIDER_BASE_URL": "http://127.0.0.1:9005/v1",
@@ -316,10 +316,12 @@ def test_init_hook_ensure_denies_claude_bash_per_tool_policy(monkeypatch, tmp_pa
         ),
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["permissionDecision"] == "deny"
-    assert "centralized block" in payload["permissionDecisionReason"]
+    output = payload["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    assert output["permissionDecision"] == "deny"
+    assert "centralized block" in output["permissionDecisionReason"]
 
 
 def test_init_hook_ensure_asks_codex_for_required_approval(monkeypatch, tmp_path: Path) -> None:
@@ -357,8 +359,117 @@ def test_init_hook_ensure_asks_codex_for_required_approval(monkeypatch, tmp_path
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "python manage.py shell" in payload["hookSpecificOutput"]["permissionDecisionReason"]
+    assert (
+        "do not support approval escalation"
+        in payload["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+
+def test_init_hook_ensure_asks_copilot_for_required_approval(monkeypatch, tmp_path: Path) -> None:
+    init_cli, fake_main = _load_init_module(monkeypatch)
+    monkeypatch.setenv(
+        "HEADROOM_TOOL_POLICY_JSON",
+        json.dumps(
+            {
+                "version": 1,
+                "rules": [
+                    {
+                        "id": "approve-python",
+                        "scope": "shell",
+                        "action": "require_approval",
+                        "command": "python",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(init_cli, "load_manifest", lambda profile: None)
+
+    result = CliRunner().invoke(
+        fake_main,
+        ["init", "hook", "ensure", "--marker", init_cli._COPILOT_HOOK_MARKER],
+        input=json.dumps(
+            {
+                "hookEventName": "PreToolUse",
+                "toolName": "powershell",
+                "toolArgs": {"command": "python manage.py shell"},
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["permissionDecision"] == "ask"
+
+
+def test_init_hook_ensure_denies_non_shell_tool_call(monkeypatch, tmp_path: Path) -> None:
+    init_cli, fake_main = _load_init_module(monkeypatch)
+    monkeypatch.setenv(
+        "HEADROOM_TOOL_POLICY_JSON",
+        json.dumps(
+            {
+                "version": 1,
+                "rules": [
+                    {
+                        "id": "deny-write",
+                        "scope": "tool_call",
+                        "action": "deny",
+                        "tool": "write_file",
+                        "argsPattern": "production",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(init_cli, "load_manifest", lambda profile: None)
+
+    result = CliRunner().invoke(
+        fake_main,
+        ["init", "hook", "ensure", "--marker", init_cli._CLAUDE_HOOK_MARKER],
+        input=json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "write_file",
+                "tool_input": {"path": "production.env"},
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "deny-write" in output["permissionDecisionReason"]
+
+
+def test_init_hook_ensure_fails_closed_with_structured_output_for_invalid_policy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    init_cli, fake_main = _load_init_module(monkeypatch)
+    monkeypatch.setenv("HEADROOM_TOOL_POLICY_JSON", '{"version": 999, "rules": []}')
+    monkeypatch.setattr(init_cli, "load_manifest", lambda profile: None)
+
+    result = CliRunner().invoke(
+        fake_main,
+        ["init", "hook", "ensure", "--marker", init_cli._CLAUDE_HOOK_MARKER],
+        input=json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo should-not-run"},
+                "cwd": str(tmp_path),
+            }
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "unsupported Headroom tool policy version" in output["permissionDecisionReason"]
 
 
 def test_init_openclaw_requires_global(monkeypatch) -> None:
@@ -428,7 +539,6 @@ def test_command_string_and_matcher_on_windows(monkeypatch) -> None:
     monkeypatch.setattr(init_cli.subprocess, "list2cmdline", lambda parts: "joined-command")
 
     assert init_cli._command_string(["headroom", "init"]) == "joined-command"
-    assert init_cli._powershell_matcher() == "Bash|PowerShell"
 
 
 def test_command_string_normalizes_backslashes_on_windows(monkeypatch) -> None:
@@ -529,6 +639,7 @@ def test_ensure_claude_hooks_rewrites_existing_entries(monkeypatch, tmp_path: Pa
     assert session_entries[1] == {"hooks": "not-a-list"}
     assert session_entries[2]["hooks"][0]["command"] == "echo keep-me"
     assert session_entries[-1]["hooks"][0]["command"].endswith("--marker headroom-init-claude")
+    assert payload["hooks"]["PreToolUse"][-1]["matcher"] == "*"
 
 
 def test_ensure_copilot_hooks_replaces_existing_marker(monkeypatch, tmp_path: Path) -> None:
@@ -538,7 +649,7 @@ def test_ensure_copilot_hooks_replaces_existing_marker(monkeypatch, tmp_path: Pa
         json.dumps(
             {
                 "hooks": {
-                    "SessionStart": [
+                    "sessionStart": [
                         {"type": "command", "command": "echo keep"},
                         {
                             "type": "command",
@@ -555,7 +666,7 @@ def test_ensure_copilot_hooks_replaces_existing_marker(monkeypatch, tmp_path: Pa
     init_cli._ensure_copilot_hooks(config_path, "init-user")
 
     payload = json.loads(config_path.read_text(encoding="utf-8"))
-    commands = [entry["command"] for entry in payload["hooks"]["SessionStart"]]
+    commands = [entry["command"] for entry in payload["hooks"]["sessionStart"]]
     assert commands == ["echo keep", "headroom init hook ensure --marker headroom-init-copilot"]
 
 
@@ -593,6 +704,7 @@ def test_ensure_codex_hooks_preserves_user_hooks(monkeypatch, tmp_path: Path) ->
     ]
     assert "echo keep" in ss_commands
     assert sum(1 for c in ss_commands if "headroom-init-codex" in c) == 1
+    assert payload["hooks"]["PreToolUse"][-1]["matcher"] == "*"
 
 
 def test_replace_marker_block_replaces_existing_block(monkeypatch) -> None:

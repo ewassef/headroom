@@ -18,13 +18,15 @@ Hook-based agents resolve policy from the same canonical sources as the OpenCode
 
 1. `HEADROOM_TOOL_POLICY_JSON`
 2. `HEADROOM_TOOL_POLICY_PATH`
-3. nearest repo `.headroom/tool_policy.json`
+3. `HEADROOM_TOOL_POLICY_URL`
 4. `~/.headroom/config/tool_policy.json`
+5. nearest repo `.headroom/tool_policy.json`
 
 Example machine-level policy:
 
 ```json
 {
+  "version": 1,
   "mode": "enforce",
   "rules": [
     {
@@ -45,9 +47,19 @@ Example machine-level policy:
 }
 ```
 
-Hook hosts receive native approval output:
+Hook hosts receive their native decision envelope:
 
-- Claude Code / GitHub Copilot CLI: `permissionDecision=allow|deny|ask`
-- Codex: `hookSpecificOutput.permissionDecision=allow|deny|ask`
+- Claude Code: `hookSpecificOutput.permissionDecision`
+- GitHub Copilot CLI: top-level `permissionDecision`
+- Codex: `hookSpecificOutput.permissionDecision`
 
-Every evaluated decision is appended to `~/.headroom/tool_policy_audit.jsonl` with the agent name, matched rule, resource, and effective action.
+Claude Code and GitHub Copilot CLI can request interactive approval. Current
+Codex `PreToolUse` hooks cannot, so `require_approval` fails closed there.
+
+Set `HEADROOM_TOOL_POLICY_URL` for a remote policy document. Optional bearer
+authentication uses `HEADROOM_TOOL_POLICY_TOKEN`; ETag-backed cache refresh
+defaults to five minutes and can be extended to one hour with
+`HEADROOM_TOOL_POLICY_REFRESH_SECONDS`.
+
+Every evaluated decision is appended to `~/.headroom/tool_policy_audit.jsonl`
+with the agent name, matched rule, resource, and effective action.

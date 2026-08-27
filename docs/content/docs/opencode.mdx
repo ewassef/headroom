@@ -69,8 +69,11 @@ The default model is `headroom/claude-sonnet-4-6`. Change it in `opencode.json` 
 |---|---|
 | `OPENCODE_CONFIG_CONTENT` | JSON payload with provider, plugin, and optional local MCP config injected by `wrap` |
 | `HEADROOM_PROXY_URL` | Proxy URL passed to Headroom MCP when a non-default port is used, and to the native plugin when configured |
-| `HEADROOM_TOOL_POLICY_JSON` | Optional JSON policy for pre-exec shell + HTTP enforcement in the native plugin transport |
+| `HEADROOM_TOOL_POLICY_JSON` | Optional JSON policy for native tool enforcement and transport defense in depth |
 | `HEADROOM_TOOL_POLICY_PATH` | Optional path to a shared JSON policy file; when unset the plugin also checks repo-local `.headroom/tool_policy.json` and `~/.headroom/config/tool_policy.json` |
+| `HEADROOM_TOOL_POLICY_URL` | HTTPS endpoint returning a versioned policy JSON document |
+| `HEADROOM_TOOL_POLICY_TOKEN` | Optional bearer token for remote policy reads |
+| `HEADROOM_TOOL_POLICY_REFRESH_SECONDS` | Remote refresh interval from 300 through 3600 seconds; invalid values use 300 |
 
 ## Failure Learning
 
@@ -123,6 +126,7 @@ export default async function plugin(input) {
   return HeadroomPlugin(input, {
     proxyUrl: "http://127.0.0.1:8787",
     toolPolicy: {
+      version: 1,
       mode: "enforce",
       rules: [
         {
@@ -143,15 +147,25 @@ export default async function plugin(input) {
 }
 ```
 
-You can keep the policy in code, inject it with `HEADROOM_TOOL_POLICY_JSON`, point at a centralized file with `HEADROOM_TOOL_POLICY_PATH`, or commit a repo-local `.headroom/tool_policy.json`.
+You can keep the policy in code, inject it with `HEADROOM_TOOL_POLICY_JSON`,
+point at a centralized file with `HEADROOM_TOOL_POLICY_PATH`, fetch it from
+`HEADROOM_TOOL_POLICY_URL`, or commit a repo-local `.headroom/tool_policy.json`.
 
 ```bash
 export HEADROOM_TOOL_POLICY_PATH=~/.headroom/config/tool_policy.json
 headroom wrap opencode
 ```
 
+```bash
+export HEADROOM_TOOL_POLICY_URL=https://policy.example.com/v1/headroom
+export HEADROOM_TOOL_POLICY_TOKEN="$POLICY_READ_TOKEN"
+export HEADROOM_TOOL_POLICY_REFRESH_SECONDS=900
+headroom wrap opencode
+```
+
 ```json title=".headroom/tool_policy.json"
 {
+  "version": 1,
   "mode": "enforce",
   "defaultAction": "allow",
   "rules": [
@@ -185,11 +199,15 @@ Policy resolution order:
 - actions: `allow`, `deny`, `require_approval`
 - `HEADROOM_TOOL_POLICY_JSON`
 - `HEADROOM_TOOL_POLICY_PATH`
-- nearest repo `.headroom/tool_policy.json`
+- `HEADROOM_TOOL_POLICY_URL`
 - shared `~/.headroom/config/tool_policy.json`
+- nearest repo `.headroom/tool_policy.json`
 - precedence: first matching rule wins
 - report-only mode: `mode: "report_only"`
-- decision logs: JSON lines on stderr with `event="headroom_tool_policy_decision"`
+- decision logs: `~/.headroom/tool_policy_audit.jsonl` plus JSON lines on stderr
+- native tool matching: use `tool` on `tool_call` rules
+- remote cache: credential-bound ETag revalidation every five minutes by default, configurable up to one hour
+- remote failure: fail closed after the cached policy expires
 
 `require_approval` currently fails closed because the OpenCode transport does not yet expose an interactive approval callback.
 
@@ -197,6 +215,7 @@ Example report-only policy:
 
 ```json
 {
+  "version": 1,
   "mode": "report_only",
   "rules": [
     {
@@ -249,7 +268,7 @@ const retrieve = createHeadroomRetrieveTool({
 1. **Config injection**. The wrapper writes a `provider.headroom` block into `opencode.json`. The provider uses `@ai-sdk/openai-compatible`, which OpenCode supports natively. Model mappings route requests through `http://127.0.0.1:<port>/v1`.
 2. **Runtime config**. `OPENCODE_CONFIG_CONTENT` is set as an env var containing provider, plugin, and optional local MCP JSON. OpenCode reads it at startup and merges it with on-disk config.
 3. **MCP tools**. Headroom registers `headroom_compress`, `headroom_retrieve`, and `headroom_stats` through `headroom mcp serve` unless `--no-mcp` is set.
-4. **Native plugin path**. `HeadroomPlugin` installs Headroom transport interception, optionally enforces tool policy rules before shell/HTTP execution, and uses `HEADROOM_PROXY_URL` or `http://127.0.0.1:8787` to reach the proxy.
+4. **Native plugin path**. `HeadroomPlugin` enforces policy through OpenCode's native pre-tool hook, retains shell/HTTP transport interception as defense in depth, and uses `HEADROOM_PROXY_URL` or `http://127.0.0.1:8787` to reach the proxy.
 5. **Unwrap**. `headroom unwrap opencode` restores `opencode.json` from the pre-wrap backup when present, strips Headroom marker blocks when no backup exists, and unregisters Headroom MCP servers.
 
 ## Troubleshooting
@@ -264,7 +283,12 @@ Set `HEADROOM_PROXY_URL` to the running proxy URL, for example `http://127.0.0.1
 
 **Tool policy did not load.**
 
-Check the resolution order above. `HEADROOM_TOOL_POLICY_JSON` wins over every file-based option. Audited hook and plugin decisions are appended to `~/.headroom/tool_policy_audit.jsonl`, which is useful for confirming which rule matched and which source won.
+Check the resolution order above. `HEADROOM_TOOL_POLICY_JSON` wins over every
+configured source, and machine policy wins over repository policy. Audited hook
+and plugin decisions are appended to `~/.headroom/tool_policy_audit.jsonl`,
+which identifies the matched rule and source. For remote policies, confirm the
+URL uses HTTPS and the cache has not expired; an unavailable service fails
+closed rather than using stale policy.
 
 **Provider not found after unwrap.**
 

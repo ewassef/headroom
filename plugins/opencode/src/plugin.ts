@@ -4,7 +4,16 @@ import { z } from "zod";
 
 import { createHeadroomRetrieveTool, getDefaultProxyUrl } from "./retrieve.js";
 import type { HeadroomToolPolicyConfig } from "./transport.js";
-import { installHeadroomTransport, TOOL_POLICY_ENV, TOOL_POLICY_PATH_ENV } from "./transport.js";
+import {
+  enforceNativeToolExecution,
+  installHeadroomTransport,
+  refreshHeadroomToolPolicy,
+  TOOL_POLICY_ENV,
+  TOOL_POLICY_PATH_ENV,
+  TOOL_POLICY_REFRESH_SECONDS_ENV,
+  TOOL_POLICY_TOKEN_ENV,
+  TOOL_POLICY_URL_ENV,
+} from "./transport.js";
 
 export interface HeadroomOpenCodePluginOptions {
   proxyUrl?: string;
@@ -30,17 +39,17 @@ function resolveProxyUrl(options?: HeadroomOpenCodePluginOptions): string {
 export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   const pluginOptions = options as HeadroomOpenCodePluginOptions;
   const proxyUrl = resolveProxyUrl(pluginOptions);
-  const project =
-    pluginOptions.project ??
-    (input.project as { id?: string } | undefined)?.id ??
-    input.directory;
+  const projectPath = input.worktree || input.directory;
+  const project = pluginOptions.project ?? projectPath;
   const retrieveTool = createHeadroomRetrieveTool({ proxyBaseUrl: proxyUrl });
   const uninstallTransport = installHeadroomTransport({
     proxyUrl,
     project,
+    policyProject: projectPath,
     debug: pluginOptions.debug,
     toolPolicy: pluginOptions.toolPolicy,
   });
+  await refreshHeadroomToolPolicy();
 
   return {
     dispose: async () => {
@@ -60,6 +69,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       }),
     },
     "shell.env": async (_input, output) => {
+      delete output.env[TOOL_POLICY_TOKEN_ENV];
       output.env.HEADROOM_ACTIVE = "1";
       output.env.HEADROOM_PROXY_URL = proxyUrl;
       output.env.HEADROOM_PROJECT = project;
@@ -72,6 +82,17 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       if (process.env[TOOL_POLICY_PATH_ENV]) {
         output.env[TOOL_POLICY_PATH_ENV] = process.env[TOOL_POLICY_PATH_ENV];
       }
+      for (const name of [
+        TOOL_POLICY_URL_ENV,
+        TOOL_POLICY_REFRESH_SECONDS_ENV,
+      ]) {
+        if (process.env[name]) {
+          output.env[name] = process.env[name];
+        }
+      }
+    },
+    "tool.execute.before": async (hookInput, output) => {
+      await enforceNativeToolExecution(hookInput.tool, output.args, projectPath);
     },
   };
 };

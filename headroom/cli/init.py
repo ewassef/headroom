@@ -46,7 +46,7 @@ from headroom.providers.codex.install import codex_uses_chatgpt_auth
 from headroom.providers.codex.threads import retag_to_headroom
 from headroom.tool_policy import (
     append_tool_policy_audit_event,
-    evaluate_shell_policy,
+    evaluate_tool_policy,
     extract_hook_tool_request,
     format_decision_reason,
     load_tool_policy,
@@ -93,10 +93,6 @@ def _command_string(parts: list[str]) -> str:
 
 def _hook_command(*parts: str) -> str:
     return _command_string([*resolve_headroom_command(), "init", "hook", "ensure", *parts])
-
-
-def _powershell_matcher() -> str:
-    return "Bash|PowerShell" if os.name == "nt" else "Bash"
 
 
 def _enable_verbose_logging() -> None:
@@ -201,7 +197,7 @@ def _ensure_claude_hooks(path: Path, profile: str, port: int) -> None:
     command = _hook_command("--profile", profile)
     for event, matcher in (
         ("SessionStart", "startup|resume"),
-        ("PreToolUse", _powershell_matcher()),
+        ("PreToolUse", "*"),
     ):
         entries = list(hooks.get(event) or []) if isinstance(hooks.get(event), list) else []
         retained: list[dict[str, Any]] = []
@@ -243,7 +239,22 @@ def _ensure_copilot_hooks(path: Path, profile: str) -> None:
     payload = _json_file(path)
     hooks = dict(payload.get("hooks") or {}) if isinstance(payload.get("hooks"), dict) else {}
     command = f"{_hook_command('--profile', profile)} --marker {_COPILOT_HOOK_MARKER}"
-    for event in ("SessionStart", "PreToolUse"):
+    for legacy_event in ("SessionStart", "PreToolUse"):
+        legacy_entries = hooks.get(legacy_event)
+        if not isinstance(legacy_entries, list):
+            continue
+        retained_legacy = [
+            entry
+            for entry in legacy_entries
+            if not (
+                isinstance(entry, dict) and _COPILOT_HOOK_MARKER in str(entry.get("command", ""))
+            )
+        ]
+        if retained_legacy:
+            hooks[legacy_event] = retained_legacy
+        else:
+            hooks.pop(legacy_event, None)
+    for event in ("sessionStart", "preToolUse"):
         entries = list(hooks.get(event) or []) if isinstance(hooks.get(event), list) else []
         retained = [
             entry
@@ -508,7 +519,7 @@ def _ensure_codex_hooks(path: Path, profile: str) -> None:
     hooks = dict(payload.get("hooks") or {}) if isinstance(payload.get("hooks"), dict) else {}
     for event, matcher in (
         ("SessionStart", "startup|resume"),
-        ("PreToolUse", "Bash"),
+        ("PreToolUse", "*"),
     ):
         entries = list(hooks.get(event) or []) if isinstance(hooks.get(event), list) else []
         retained: list[dict[str, Any]] = []
@@ -804,7 +815,7 @@ def _read_hook_payload() -> dict[str, Any] | None:
 
 
 def _hook_permission_output(agent: str, action: str, reason: str) -> dict[str, Any]:
-    if agent == "codex":
+    if agent in {"claude", "codex"}:
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -829,12 +840,13 @@ def _maybe_emit_tool_policy_decision(marker: str | None, payload: dict[str, Any]
     except ValueError as exc:
         sys.stdout.write(json.dumps(_hook_permission_output(agent, "deny", str(exc))))
         sys.stdout.flush()
-        raise SystemExit(2) from exc
+        raise SystemExit(0) from exc
     if policy is None:
         return
-    decision = evaluate_shell_policy(
+    decision = evaluate_tool_policy(
         policy,
-        command_line=request.command_line,
+        tool_name=request.tool_name,
+        tool_input=request.tool_input,
         cwd=request.cwd,
         env=request.env,
     )
@@ -844,9 +856,13 @@ def _maybe_emit_tool_policy_decision(marker: str | None, payload: dict[str, Any]
     if decision.effective_action == "allow":
         return
     permission = "ask" if decision.effective_action == "require_approval" else "deny"
-    sys.stdout.write(json.dumps(_hook_permission_output(agent, permission, format_decision_reason(decision))))
+    reason = format_decision_reason(decision)
+    if permission == "ask" and agent == "codex":
+        permission = "deny"
+        reason += "; Codex PreToolUse hooks do not support approval escalation"
+    sys.stdout.write(json.dumps(_hook_permission_output(agent, permission, reason)))
     sys.stdout.flush()
-    raise SystemExit(2 if permission == "deny" else 0)
+    raise SystemExit(0)
 
 
 def _probe_init_targets(global_scope: bool) -> list[tuple[str, str | None]]:
