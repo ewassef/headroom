@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -64,7 +63,7 @@ def vscode_proxy_url(port: int, project: str | None = None) -> str:
     return str(with_project_prefix(f"http://127.0.0.1:{port}", project))
 
 
-def _strip_jsonc_comments(value: str) -> str:
+def strip_jsonc_comments(value: str) -> str:
     """Strip JSONC comments while respecting quoted strings."""
     result: list[str] = []
     index = 0
@@ -108,11 +107,46 @@ def _strip_jsonc_comments(value: str) -> str:
     return "".join(result)
 
 
+def strip_jsonc_trailing_commas(value: str) -> str:
+    """Remove trailing commas while preserving comma-like text inside strings."""
+    result: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(value):
+        char = value[index]
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < len(value) and value[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(value) and value[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
 def _validate_settings(raw: str, path: Path) -> None:
-    candidate = _strip_jsonc_comments(raw)
+    candidate = strip_jsonc_comments(raw)
     if candidate.startswith("\ufeff"):
         candidate = candidate[1:]
-    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+    candidate = strip_jsonc_trailing_commas(candidate)
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
@@ -182,7 +216,7 @@ def configure_vscode_proxy_settings(path: Path, proxy_url: str) -> str:
         raise click.ClickException(f"Could not locate the root object in {path}.")
     before = raw[:close].rstrip()
     after = raw[close:]
-    inner = _strip_jsonc_comments(before).rstrip()
+    inner = strip_jsonc_comments(before).rstrip()
     needs_comma = not inner.endswith("{") and not inner.endswith(",")
     separator = "," if needs_comma else ""
     line_sep = "\r\n" if "\r\n" in raw else "\n"

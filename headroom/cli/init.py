@@ -44,6 +44,7 @@ from headroom.providers.claude import TOOL_SEARCH_DEFAULT, TOOL_SEARCH_ENV
 from headroom.providers.claude.runtime import TOOL_SEARCH_FOUNDRY_DEFAULT
 from headroom.providers.codex.install import codex_uses_chatgpt_auth
 from headroom.providers.codex.threads import retag_to_headroom
+from headroom.providers.copilot.vscode import strip_jsonc_comments, strip_jsonc_trailing_commas
 from headroom.tool_policy import (
     append_tool_policy_audit_event,
     evaluate_tool_policy,
@@ -175,6 +176,214 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _jsonc_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        content = handle.read()
+    candidate = strip_jsonc_comments(content)
+    if candidate.startswith("\ufeff"):
+        candidate = candidate[1:]
+    candidate = strip_jsonc_trailing_commas(candidate)
+    if not candidate.strip():
+        return {}
+    try:
+        payload = json.loads(candidate, object_pairs_hook=_json_object_without_duplicates)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(
+            f"{path} contains invalid JSONC ({exc}); fix it and re-run, or move it aside."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"{path} must contain a JSON object; refusing to overwrite it.")
+    return payload
+
+
+def _json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSONC property {key!r}")
+        result[key] = value
+    return result
+
+
+def _skip_jsonc_trivia(content: str, index: int) -> int:
+    while index < len(content):
+        if content[index].isspace():
+            index += 1
+        elif content.startswith("//", index):
+            newline = content.find("\n", index + 2)
+            index = len(content) if newline < 0 else newline + 1
+        elif content.startswith("/*", index):
+            end = content.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("unterminated JSONC block comment")
+            index = end + 2
+        else:
+            break
+    return index
+
+
+def _scan_jsonc_string(content: str, index: int) -> int:
+    index += 1
+    while index < len(content):
+        if content[index] == "\\":
+            index += 2
+        elif content[index] == '"':
+            return index + 1
+        else:
+            index += 1
+    raise ValueError("unterminated JSONC string")
+
+
+def _scan_jsonc_value(content: str, index: int) -> int:
+    if content[index] == '"':
+        return _scan_jsonc_string(content, index)
+    if content[index] not in "[{":
+        while (
+            index < len(content)
+            and not content[index].isspace()
+            and content[index] not in ",}]"
+            and not content.startswith(("//", "/*"), index)
+        ):
+            index += 1
+        return index
+
+    closing = {"[": "]", "{": "}"}
+    stack = [closing[content[index]]]
+    index += 1
+    while index < len(content):
+        if content[index] == '"':
+            index = _scan_jsonc_string(content, index)
+        elif content.startswith("//", index) or content.startswith("/*", index):
+            index = _skip_jsonc_trivia(content, index)
+        elif content[index] in "[{":
+            stack.append(closing[content[index]])
+            index += 1
+        elif content[index] == stack[-1]:
+            stack.pop()
+            index += 1
+            if not stack:
+                return index
+        else:
+            index += 1
+    raise ValueError("unterminated JSONC value")
+
+
+def _jsonc_comments(content: str) -> list[str]:
+    comments: list[str] = []
+    index = 0
+    while index < len(content):
+        if content[index] == '"':
+            index = _scan_jsonc_string(content, index)
+        elif content.startswith("//", index):
+            end = content.find("\n", index + 2)
+            end = len(content) if end < 0 else end
+            comments.append(content[index:end].rstrip("\r"))
+            index = end
+        elif content.startswith("/*", index):
+            end = content.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("unterminated JSONC block comment")
+            comments.append(content[index : end + 2])
+            index = end + 2
+        else:
+            index += 1
+    return comments
+
+
+def _jsonc_root_property_span(
+    content: str, property_name: str
+) -> tuple[tuple[int, int] | None, int, int | None]:
+    index = _skip_jsonc_trivia(content.lstrip("\ufeff"), 0)
+    offset = len(content) - len(content.lstrip("\ufeff"))
+    index += offset
+    if index >= len(content) or content[index] != "{":
+        raise ValueError("JSONC root must be an object")
+    index += 1
+    last_value_end = None
+    while index < len(content):
+        index = _skip_jsonc_trivia(content, index)
+        if content[index] == "}":
+            return None, index, last_value_end
+        if content[index] == ",":
+            index += 1
+            continue
+        key_start = index
+        key_end = _scan_jsonc_string(content, key_start)
+        key = json.loads(content[key_start:key_end])
+        index = _skip_jsonc_trivia(content, key_end)
+        if content[index] != ":":
+            raise ValueError("JSONC property is missing ':'")
+        value_start = _skip_jsonc_trivia(content, index + 1)
+        value_end = _scan_jsonc_value(content, value_start)
+        if key == property_name:
+            return (value_start, value_end), -1, None
+        last_value_end = value_end
+        index = value_end
+    raise ValueError("unterminated JSONC root object")
+
+
+def _write_jsonc_root_property(path: Path, property_name: str, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with path.open(encoding="utf-8", newline="") as handle:
+            content = handle.read()
+    else:
+        content = "{}\n"
+    line_sep = "\r\n" if "\r\n" in content else "\n"
+    if not strip_jsonc_comments(content).lstrip("\ufeff").strip():
+        prefix = content.rstrip("\r\n")
+        content = prefix + (line_sep if prefix else "") + "{}" + line_sep
+    span, root_close, last_value_end = _jsonc_root_property_span(content, property_name)
+    serialized = json.dumps(value, indent=2)
+    if span is not None:
+        line_start = max(content.rfind("\n", 0, span[0]), content.rfind("\r", 0, span[0])) + 1
+        indentation = re.match(r"[ \t]*", content[line_start : span[0]]).group()
+        replacement = serialized.replace("\n", f"{line_sep}{indentation}")
+        comments = _jsonc_comments(content[span[0] : span[1]])
+        if comments:
+            comment_block = "".join(
+                f"{comment.rstrip()}{line_sep}{indentation}" for comment in comments
+            )
+            replacement = comment_block + replacement
+        updated = content[: span[0]] + replacement + content[span[1] :]
+    else:
+        before = content[:root_close].rstrip()
+        clean_before = strip_jsonc_comments(before).rstrip()
+        if not clean_before.endswith(("{", ",")) and last_value_end is not None:
+            content = content[:last_value_end] + "," + content[last_value_end:]
+            root_close += 1
+        before = content[:root_close].rstrip()
+        newline = "" if before.endswith(("\n", "\r")) else line_sep
+        replacement = serialized.replace("\n", f"{line_sep}  ")
+        updated = (
+            before
+            + newline
+            + f"  {json.dumps(property_name)}: {replacement}"
+            + line_sep
+            + content[root_close:]
+        )
+    _jsonc_file_content(updated, path)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)
+
+
+def _jsonc_file_content(content: str, path: Path) -> None:
+    candidate = strip_jsonc_comments(content)
+    if candidate.startswith("\ufeff"):
+        candidate = candidate[1:]
+    candidate = strip_jsonc_trailing_commas(candidate)
+    try:
+        parsed = json.loads(candidate, object_pairs_hook=_json_object_without_duplicates)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(
+            f"Could not safely update {path}: {exc}. Headroom did not overwrite it."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise click.ClickException(f"{path} must contain a JSON object; refusing to overwrite it.")
+
+
 def _ensure_claude_hooks(path: Path, profile: str, port: int) -> None:
     logger.debug("ensure claude hooks: %s (profile=%s, port=%s)", path, profile, port)
     payload = _json_file(path)
@@ -236,7 +445,7 @@ def _ensure_claude_hooks(path: Path, profile: str, port: int) -> None:
 
 def _ensure_copilot_hooks(path: Path, profile: str) -> None:
     logger.debug("ensure copilot hooks: %s (profile=%s)", path, profile)
-    payload = _json_file(path)
+    payload = _jsonc_file(path)
     hooks = dict(payload.get("hooks") or {}) if isinstance(payload.get("hooks"), dict) else {}
     command = f"{_hook_command('--profile', profile)} --marker {_COPILOT_HOOK_MARKER}"
     for legacy_event in ("SessionStart", "PreToolUse"):
@@ -266,7 +475,7 @@ def _ensure_copilot_hooks(path: Path, profile: str) -> None:
         retained.append({"type": "command", "command": command, "cwd": ".", "timeout": 15})
         hooks[event] = retained
     payload["hooks"] = hooks
-    _write_json(path, payload)
+    _write_jsonc_root_property(path, "hooks", hooks)
 
 
 def _replace_marker_block(

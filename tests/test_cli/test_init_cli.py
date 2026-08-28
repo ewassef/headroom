@@ -670,6 +670,95 @@ def test_ensure_copilot_hooks_replaces_existing_marker(monkeypatch, tmp_path: Pa
     assert commands == ["echo keep", "headroom init hook ensure --marker headroom-init-copilot"]
 
 
+def test_ensure_copilot_hooks_preserves_jsonc_comments(monkeypatch, tmp_path: Path) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    original_comment = "// User settings belong in settings.json."
+    config_path.write_text(
+        f'{original_comment}\n{{\n  // Keep this comment.\n  "telemetry": false,\n}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(init_cli, "_hook_command", lambda *parts: "headroom init hook ensure")
+
+    init_cli._ensure_copilot_hooks(config_path, "init-user")
+
+    updated = config_path.read_text(encoding="utf-8")
+    assert original_comment in updated
+    assert "// Keep this comment." in updated
+    assert '"telemetry": false' in updated
+    payload = init_cli._jsonc_file(config_path)
+    assert payload["hooks"]["preToolUse"][-1]["command"].endswith("--marker headroom-init-copilot")
+
+
+def test_ensure_copilot_hooks_preserves_comments_inside_hooks(monkeypatch, tmp_path: Path) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    config_path.write_text(
+        '{\n  "hooks": {\n    // Keep custom hooks documented.\n'
+        '    "sessionStart": [{"type": "command", "command": "echo keep"}]\n  }\n}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(init_cli, "_hook_command", lambda *parts: "headroom init hook ensure")
+
+    init_cli._ensure_copilot_hooks(config_path, "init-user")
+
+    updated = config_path.read_text(encoding="utf-8")
+    assert "// Keep custom hooks documented." in updated
+    payload = init_cli._jsonc_file(config_path)
+    assert payload["hooks"]["sessionStart"][0]["command"] == "echo keep"
+
+
+@pytest.mark.parametrize("initial", ["", "// generated file\r\n"])
+def test_ensure_copilot_hooks_initializes_empty_jsonc(
+    monkeypatch, tmp_path: Path, initial: str
+) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    with config_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(initial)
+    monkeypatch.setattr(init_cli, "_hook_command", lambda *parts: "headroom init hook ensure")
+
+    init_cli._ensure_copilot_hooks(config_path, "init-user")
+
+    updated = config_path.read_bytes()
+    if "\r\n" in initial:
+        assert b"\r\n" in updated and b"\n" not in updated.replace(b"\r\n", b"")
+    assert init_cli._jsonc_file(config_path)["hooks"]["preToolUse"]
+
+
+def test_jsonc_parser_preserves_comma_sequences_in_strings(monkeypatch, tmp_path: Path) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    config_path.write_text('{"command": "echo ,}",}\n', encoding="utf-8")
+
+    assert init_cli._jsonc_file(config_path)["command"] == "echo ,}"
+
+
+def test_ensure_copilot_hooks_accepts_comment_after_primitive(monkeypatch, tmp_path: Path) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    comment = "// keep this, managed elsewhere"
+    config_path.write_text(f'{{\n  "telemetry": false {comment}\n}}\n', encoding="utf-8")
+    monkeypatch.setattr(init_cli, "_hook_command", lambda *parts: "headroom init hook ensure")
+
+    init_cli._ensure_copilot_hooks(config_path, "init-user")
+
+    assert comment in config_path.read_text(encoding="utf-8")
+    assert init_cli._jsonc_file(config_path)["hooks"]["preToolUse"]
+
+
+def test_jsonc_parser_rejects_duplicate_keys_without_writing(monkeypatch, tmp_path: Path) -> None:
+    init_cli, _ = _load_init_module(monkeypatch)
+    config_path = tmp_path / "copilot.json"
+    original = '{"hooks": {}, "hooks": {"custom": []}}\n'
+    config_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(click.ClickException, match="duplicate JSONC property"):
+        init_cli._ensure_copilot_hooks(config_path, "init-user")
+
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_ensure_codex_hooks_preserves_user_hooks(monkeypatch, tmp_path: Path) -> None:
     """init codex must merge into hooks.json, not overwrite it — a user's own
     hooks (and unrelated top-level keys) must survive."""
