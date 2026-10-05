@@ -336,10 +336,15 @@ ETag: "policy-42"
   credentials or tenants.
 - Cache writes are atomic and stored under `~/.headroom/policy-cache/`.
 - A fresh cache avoids a network request until its refresh interval elapses.
+- A `304 Not Modified` renews freshness only after the cached policy is validated.
 - After cache expiry, an unavailable, invalid, oversized, or redirected policy fails
   closed.
-- A second workspace with a different policy or credential context in the same process
-  is rejected rather than replacing the active policy.
+- Compatible plugin instances with the same source and credential context share the
+  loaded policy state. A different policy or credential context in the same process is
+  rejected rather than replacing the active policy.
+- Child shims receive only the effective serialized policy and its internal expiry.
+  They never receive the remote URL or token and fail closed when that expiry passes,
+  including in long-lived children that cannot refresh.
 
 When `HEADROOM_STATELESS` is `1`, `true`, `yes`, or `on`, disk audit and cache reads
 and writes are disabled. Remote policy remains fail-closed, but there is no persisted
@@ -395,7 +400,8 @@ The first configured source wins:
 6. nearest `.headroom/tool_policy.json`
 
 An invalid selected source is an error. The plugin does not silently fall through to a
-lower-precedence source.
+lower-precedence source. Selection happens once during installation; a configured
+remote URL is fetched or refreshed only when it is the winning source.
 
 `HEADROOM_CONFIG_DIR` changes only the global policy directory. For example,
 `HEADROOM_CONFIG_DIR=/etc/headroom` reads `/etc/headroom/tool_policy.json`.
@@ -445,7 +451,13 @@ fails closed on grammar that can construct or hide an executable at runtime:
 - `eval`, `exec`, `source`, and equivalent commands.
 
 This deliberately favors a false denial over authorizing an executable that the policy
-could not identify.
+could not identify. Quoted text and ordinary argument tokens are not treated as shell
+grammar, so commands such as `echo 'if'` remain statically authorizable.
+
+For `spawn`, `execFile`, and `fork`, direct executable or module paths are atomic
+identifiers rather than shell text. Rules may match the complete path or its basename,
+including paths containing spaces. `exec` and direct APIs explicitly configured with a
+shell retain shell parsing.
 
 ## Authority and terminal outcomes
 
@@ -456,7 +468,8 @@ OpenCode's native tool lifecycle is the authoritative path:
    hash of canonical arguments.
 3. A denied call emits `effect: "blocked"` and the plugin throws.
 4. An allowed call has its argument graph frozen before execution.
-5. A matching `tool.execute.after` emits `effect: "allowed"`.
+5. A `tool.execute.after` with the same stable binding and canonical argument values
+   emits `effect: "allowed"`; object identity is not required.
 
 OpenCode currently invokes `tool.execute.after` only after successful tool execution;
 it has no error hook. The plugin therefore retains allowed preflights in a bounded,
@@ -467,7 +480,7 @@ expiring store:
 - capacity eviction: `effect: "unknown", reason: "capacity_evicted"`;
 - timeout: `effect: "unknown", reason: "postflight_timeout"`;
 - mismatched final binding: `effect: "unknown", reason: "postflight_mismatch"`;
-- ambiguous reuse of a retired argument graph:
+- ambiguous reuse of a session/call identity across generations:
   `effect: "unknown", reason: "ambiguous_reused_call"`;
 - plugin shutdown: `effect: "unknown", reason: "plugin_disposed"`;
 - reused session/call identity: `effect: "unknown", reason: "call_replaced"`.

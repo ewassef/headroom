@@ -134,7 +134,7 @@ describe("HeadroomPlugin", () => {
     ).toBe(false);
 
     await plugin["tool.execute.after"]?.(
-      { ...input, args },
+      { ...input, args: { command: "echo ok" } },
       {
         title: "shell",
         output: "ok",
@@ -295,12 +295,10 @@ describe("HeadroomPlugin", () => {
 
     await plugin["tool.execute.before"]?.(input, { args: firstArgs });
     await plugin["tool.execute.before"]?.(input, { args: secondArgs });
-    await expect(
-      plugin["tool.execute.after"]?.(
-        { ...input, args: firstArgs },
-        { title: "shell", output: "late", metadata: {} },
-      ),
-    ).rejects.toThrow(/did not match the bound preflight object/);
+    await plugin["tool.execute.after"]?.(
+      { ...input, args: firstArgs },
+      { title: "shell", output: "late", metadata: {} },
+    );
 
     const acknowledgements = stderr.mock.calls
       .map(([value]) => String(value).trim())
@@ -436,6 +434,28 @@ describe("HeadroomPlugin", () => {
         { args: { command: "x=echo; $x dynamic" } },
       ),
     ).rejects.toThrow(/dynamic or escaped shell execution cannot be safely authorized/);
+    await plugin.dispose?.();
+  });
+
+  it.each([
+    "echo 'if'",
+    'echo "eval"',
+    "echo if then else",
+  ])("allows reserved words used only as literal arguments: %s", async (command) => {
+    const plugin = await HeadroomPlugin(pluginInput(), {
+      proxyUrl: "http://127.0.0.1:8787",
+      toolPolicy: {
+        defaultAction: "deny",
+        rules: [{ id: "allow-echo", scope: "shell", action: "allow", command: "echo" }],
+      },
+    });
+
+    await expect(
+      plugin["tool.execute.before"]?.(
+        { tool: "bash", sessionID: `s-literal-${command}`, callID: "c-literal" },
+        { args: { command } },
+      ),
+    ).resolves.toBeUndefined();
     await plugin.dispose?.();
   });
 

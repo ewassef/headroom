@@ -21,6 +21,7 @@ export const TOOL_POLICY_PATH_ENV = "HEADROOM_TOOL_POLICY_PATH";
 export const TOOL_POLICY_URL_ENV = "HEADROOM_TOOL_POLICY_URL";
 export const TOOL_POLICY_TOKEN_ENV = "HEADROOM_TOOL_POLICY_TOKEN";
 export const TOOL_POLICY_REFRESH_SECONDS_ENV = "HEADROOM_TOOL_POLICY_REFRESH_SECONDS";
+export const TOOL_POLICY_VALID_UNTIL_ENV = "HEADROOM_INTERNAL_TOOL_POLICY_VALID_UNTIL";
 const TOOL_POLICY_FILE_NAME = "tool_policy.json";
 const POLICY_VERSION = 1;
 const DEFAULT_REFRESH_SECONDS = 300;
@@ -115,6 +116,7 @@ interface TransportState {
   previousProxyUrlEnv?: string;
   previousExcludeHostsEnv?: string;
   previousToolPolicyEnv?: string;
+  previousToolPolicyValidUntilEnv?: string;
   originalFetch: typeof fetch;
   originalHttpRequest: HttpRequest;
   originalHttpGet: HttpGet;
@@ -210,6 +212,7 @@ interface ShellPolicyInput {
   cwd?: string;
   env?: NodeJS.ProcessEnv | Record<string, unknown>;
   toolName?: string;
+  atomicCommand?: boolean;
 }
 
 interface HttpPolicyInput {
@@ -386,6 +389,7 @@ function compileToolPolicy(
   if (!loaded) {
     return undefined;
   }
+
   if (!Array.isArray(loaded.rules)) {
     throw new Error("Headroom tool policy requires a rules array");
   }
@@ -438,6 +442,101 @@ function compileToolPolicy(
     }),
     source,
   };
+}
+
+interface ResolvedToolPolicySource {
+  input?: HeadroomToolPolicyInput;
+  source: string;
+  identity: string;
+  remoteUrl?: string;
+  remoteToken: string;
+  validUntil?: number;
+}
+
+function parsePropagatedValidUntil(value: string | undefined): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function policySourceFingerprint(value: HeadroomToolPolicyInput): string {
+  const serialized = typeof value === "string" ? value : stableJson(value);
+  return createHash("sha256").update(serialized).digest("hex");
+}
+
+function resolveToolPolicySource(
+  options: InstallOptions,
+  existing: TransportState | undefined,
+): ResolvedToolPolicySource {
+  if (options.toolPolicy !== undefined) {
+    return {
+      input: options.toolPolicy,
+      source: "configured",
+      identity: `configured:${policySourceFingerprint(options.toolPolicy)}`,
+      remoteToken: "",
+    };
+  }
+
+  const installedPolicy = existing?.toolPolicy?.serialized;
+  const currentPolicy = process.env[TOOL_POLICY_ENV]?.trim();
+  const originalPolicy = existing?.previousToolPolicyEnv?.trim();
+  const policyJson =
+    existing && currentPolicy === installedPolicy && currentPolicy !== originalPolicy
+      ? originalPolicy
+      : currentPolicy;
+  if (policyJson) {
+    const propagatedExpiry =
+      existing && currentPolicy === installedPolicy && currentPolicy !== originalPolicy
+        ? existing.previousToolPolicyValidUntilEnv
+        : process.env[TOOL_POLICY_VALID_UNTIL_ENV];
+    return {
+      input: policyJson,
+      source: TOOL_POLICY_ENV,
+      identity: `${TOOL_POLICY_ENV}:${policySourceFingerprint(policyJson)}`,
+      remoteToken: "",
+      validUntil: parsePropagatedValidUntil(propagatedExpiry),
+    };
+  }
+
+  const configuredPath = process.env[TOOL_POLICY_PATH_ENV]?.trim();
+  if (configuredPath) {
+    return {
+      input: configuredPath,
+      source: TOOL_POLICY_PATH_ENV,
+      identity: `${TOOL_POLICY_PATH_ENV}:${path.resolve(configuredPath)}`,
+      remoteToken: "",
+    };
+  }
+
+  const remoteUrl = process.env[TOOL_POLICY_URL_ENV]?.trim() || undefined;
+  if (remoteUrl) {
+    const remoteToken = process.env[TOOL_POLICY_TOKEN_ENV]?.trim() ?? "";
+    return {
+      source: TOOL_POLICY_URL_ENV,
+      identity: `${TOOL_POLICY_URL_ENV}:${remoteUrl}`,
+      remoteUrl,
+      remoteToken,
+    };
+  }
+
+  const globalPath = defaultGlobalToolPolicyPath();
+  if (fs.existsSync(globalPath)) {
+    return {
+      input: globalPath,
+      source: globalPath,
+      identity: `global:${path.resolve(globalPath)}`,
+      remoteToken: "",
+    };
+  }
+  const localPath = findLocalToolPolicyPath(options.policyProject ?? options.project);
+  if (localPath) {
+    return {
+      input: localPath,
+      source: localPath,
+      identity: `repository:${path.resolve(localPath)}`,
+      remoteToken: "",
+    };
+  }
+  return { source: "unconfigured", identity: "unconfigured", remoteToken: "" };
 }
 
 function workspaceDir(): string {
@@ -616,13 +715,13 @@ async function loadRemoteToolPolicy(
     throw new Error(`Headroom tool policy service ${remoteLabel} is unavailable`);
   }
   if (response.status === 304 && cache) {
-    const refreshed = { ...cache, fetched_at: now };
-    writeRemotePolicyCache(url, refreshed, token);
     const compiled = compileToolPolicy(
-      refreshed.policy,
+      cache.policy,
       undefined,
       `remote-cache:${remoteLabel}`,
     )!;
+    const refreshed = { ...cache, fetched_at: now };
+    writeRemotePolicyCache(url, refreshed, token);
     compiled.validUntil = now + toolPolicyRefreshSeconds();
     return compiled;
   }
@@ -691,8 +790,14 @@ function withShimEnv(
   withExcludeHostsEnv(nextEnv, excludeHosts);
   if (toolPolicy) {
     nextEnv[TOOL_POLICY_ENV] = toolPolicy.serialized;
+    if (toolPolicy.validUntil !== undefined) {
+      nextEnv[TOOL_POLICY_VALID_UNTIL_ENV] = String(toolPolicy.validUntil);
+    } else {
+      delete nextEnv[TOOL_POLICY_VALID_UNTIL_ENV];
+    }
   } else {
     delete nextEnv[TOOL_POLICY_ENV];
+    delete nextEnv[TOOL_POLICY_VALID_UNTIL_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -718,8 +823,14 @@ function installProcessEnv(
   withExcludeHostsEnv(process.env, excludeHosts);
   if (toolPolicy) {
     process.env[TOOL_POLICY_ENV] = toolPolicy.serialized;
+    if (toolPolicy.validUntil !== undefined) {
+      process.env[TOOL_POLICY_VALID_UNTIL_ENV] = String(toolPolicy.validUntil);
+    } else {
+      delete process.env[TOOL_POLICY_VALID_UNTIL_ENV];
+    }
   } else {
     delete process.env[TOOL_POLICY_ENV];
+    delete process.env[TOOL_POLICY_VALID_UNTIL_ENV];
   }
   const shim = shimImportSpecifier();
   if (shim) {
@@ -850,6 +961,7 @@ function shellCommandSubstitutions(commandLine: string): string[] {
       index += 1;
       continue;
     }
+
     if (quote === "'") {
       if (char === "'") quote = "";
       continue;
@@ -911,6 +1023,75 @@ function shellCommandSubstitutions(commandLine: string): string[] {
     }
   }
   return substitutions;
+}
+
+const DYNAMIC_COMMANDS = new Set([
+  "call",
+  "case",
+  "coproc",
+  "do",
+  "done",
+  "elif",
+  "else",
+  "esac",
+  "eval",
+  "exec",
+  "fi",
+  "for",
+  "function",
+  "get-command",
+  "iex",
+  "if",
+  "invoke-expression",
+  "select",
+  "source",
+  "then",
+  "until",
+  "while",
+]);
+
+function hasDynamicShellExecution(commandLine: string): boolean {
+  let quote: "'" | '"' | "" = "";
+  let visible = "";
+  for (let index = 0; index < commandLine.length; index += 1) {
+    const char = commandLine[index];
+    if (quote === "'") {
+      visible += " ";
+      if (char === "'") quote = "";
+      continue;
+    }
+    if (char === "'") {
+      quote = "'";
+      visible += " ";
+      continue;
+    }
+    if (char === '"') {
+      quote = quote === '"' ? "" : '"';
+      visible += " ";
+      continue;
+    }
+    if (char === "\\") {
+      const next = commandLine[index + 1];
+      if (quote !== '"' && next && /[A-Za-z0-9]/.test(next)) return true;
+      visible += "  ";
+      index += 1;
+      continue;
+    }
+    if (
+      char === "`" ||
+      char === "$" ||
+      (char === "%" && /[^%\r\n]+%/.test(commandLine.slice(index))) ||
+      (char === "!" && /^![A-Za-z_][A-Za-z0-9_]*!/.test(commandLine.slice(index)))
+    ) {
+      return true;
+    }
+    visible += quote ? " " : char;
+  }
+  if (quote) return true;
+  if (/[<>]\s*\(|(?:^|[;&|]\s*)&\s*\(|[{}]/.test(visible)) return true;
+  return shellCommandBinaries(commandLine).some((command) =>
+    DYNAMIC_COMMANDS.has(normalizedCommandName(command)),
+  );
 }
 
 export function shellCommandBinaries(commandLine: string): string[] {
@@ -998,7 +1179,7 @@ function safePolicyResource(
   input: ShellPolicyInput | HttpPolicyInput | ToolCallPolicyInput,
 ): string {
   if (input.scope === "shell") {
-    return shellCommandBinaries(input.resource)
+    return (input.atomicCommand ? [input.command] : shellCommandBinaries(input.resource))
       .map((command) => normalizedCommandName(command))
       .filter(Boolean)
       .join(",");
@@ -1093,17 +1274,16 @@ function evaluatePolicy(
   if (!policy) {
     return undefined;
   }
-  const hasDynamicShellExecution =
+  const dynamicShellExecution =
     input.scope === "shell" &&
+    !input.atomicCommand &&
     (policy.defaultAction === "deny" ||
       policy.rules.some(
         (rule) =>
           rule.action !== "allow" &&
           (rule.scope === "shell" || rule.scope === "tool_call"),
       )) &&
-    /(?:\\[A-Za-z0-9]|\$(?:\{|[A-Za-z_('" ])|`|%[^%\r\n]+%|(?:^|[\s;&|])%[A-Za-z]|![A-Za-z_][A-Za-z0-9_]*!|\b(?:eval|exec|source|invoke-expression|iex|get-command|call|if|then|else|elif|fi|for|while|until|do|done|case|esac|select|function|coproc)\b|[<>]\s*\(|(?:^|[;&|]\s*)&\s*\(|[{}])/i.test(
-      input.resource,
-    );
+    hasDynamicShellExecution(input.resource);
   const matchedRule = policy.rules.find((rule) => {
         if (
           (input.scope === "tool_call" && rule.scope !== "tool_call") ||
@@ -1122,7 +1302,9 @@ function evaluatePolicy(
           }
         }
         if (input.scope === "shell") {
-          const commands = shellCommandBinaries(input.resource);
+          const commands = input.atomicCommand
+            ? [input.command]
+            : shellCommandBinaries(input.resource);
           if (rule.commands?.length) {
             const commandsMatch =
               rule.action === "allow"
@@ -1185,7 +1367,7 @@ function evaluatePolicy(
         return true;
     });
   const dynamicShellDenied =
-    hasDynamicShellExecution && (!matchedRule || matchedRule.action === "allow");
+    dynamicShellExecution && (!matchedRule || matchedRule.action === "allow");
   const action = dynamicShellDenied
     ? "deny"
     : (matchedRule?.action ?? policy.defaultAction);
@@ -1448,6 +1630,7 @@ function wrapSpawn(originalSpawn: ChildSpawn): ChildSpawn {
       argsText: resource,
       cwd: effectiveChildCwd(options?.cwd),
       env: options?.env as NodeJS.ProcessEnv | Record<string, unknown> | undefined,
+      atomicCommand: options?.shell !== true && typeof options?.shell !== "string",
     });
     const optionIndex = Array.isArray(args[1]) ? 2 : 1;
     return Reflect.apply(originalSpawn, this, injectOptionsEnv(args, optionIndex, state.proxyUrl));
@@ -1493,6 +1676,7 @@ function wrapExecFile(originalExecFile: ChildExecFile): ChildExecFile {
       argsText: resource,
       cwd: effectiveChildCwd(options?.cwd),
       env: options?.env as NodeJS.ProcessEnv | Record<string, unknown> | undefined,
+      atomicCommand: options?.shell !== true && typeof options?.shell !== "string",
     });
     const optionIndex = Array.isArray(args[1]) ? 2 : 1;
     return Reflect.apply(originalExecFile, this, injectOptionsEnv(args, optionIndex, state.proxyUrl));
@@ -1518,6 +1702,7 @@ function wrapFork(originalFork: ChildFork): ChildFork {
       argsText: resource,
       cwd: effectiveChildCwd(options?.cwd),
       env: options?.env as NodeJS.ProcessEnv | Record<string, unknown> | undefined,
+      atomicCommand: true,
     });
     const optionIndex = Array.isArray(args[1]) ? 2 : 1;
     return Reflect.apply(originalFork, this, injectOptionsEnv(args, optionIndex, state.proxyUrl));
@@ -1830,41 +2015,36 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     options.excludeHosts ?? process.env[EXCLUDE_HOSTS_ENV] ?? "",
   );
   const existing = getState();
-  const remotePolicyUrl =
-    options.toolPolicy === undefined
-      ? process.env[TOOL_POLICY_URL_ENV]?.trim() || undefined
-      : undefined;
-  const remotePolicyToken =
-    options.toolPolicy === undefined
-      ? process.env[TOOL_POLICY_TOKEN_ENV]?.trim() ?? ""
-      : "";
-  const policyContextKey = createHash("sha256")
-    .update(
-      stableJson({
-        policyProject: options.policyProject ?? options.project,
-        remotePolicyUrl,
-        remotePolicyToken,
-      }),
-    )
-    .digest("hex");
+  const selectedSource = resolveToolPolicySource(options, existing);
   let toolPolicy: CompiledToolPolicy | undefined;
   let policyUnavailable: string | undefined;
   try {
-    toolPolicy = compileToolPolicy(options.toolPolicy, options.policyProject ?? options.project);
+    toolPolicy = compileToolPolicy(
+      selectedSource.input,
+      options.policyProject ?? options.project,
+      selectedSource.source,
+    );
+    if (toolPolicy && selectedSource.validUntil !== undefined) {
+      toolPolicy.validUntil = selectedSource.validUntil;
+    }
   } catch (error) {
     policyUnavailable = error instanceof Error ? error.message : String(error);
   }
-  if (remotePolicyUrl && !toolPolicy) {
+  if (selectedSource.remoteUrl && !toolPolicy) {
     policyUnavailable ??= "remote Headroom tool policy has not been loaded";
   }
+  const policyContextKey = createHash("sha256")
+    .update(
+      stableJson({
+        identity: selectedSource.identity,
+        remoteToken: selectedSource.remoteToken,
+        policy: selectedSource.remoteUrl ? undefined : toolPolicy?.serialized,
+        validUntil: selectedSource.validUntil,
+      }),
+    )
+    .digest("hex");
   if (existing) {
-    const existingPolicy = existing.toolPolicy?.serialized;
-    const nextPolicy = toolPolicy?.serialized;
-    if (
-      existingPolicy !== nextPolicy ||
-      existing.policyUnavailable !== policyUnavailable ||
-      existing.policyContextKey !== policyContextKey
-    ) {
+    if (existing.policyContextKey !== policyContextKey) {
       throw new Error(
         "[headroom] Multiple OpenCode workspaces with different tool policies share one " +
           "process; refusing to replace the active policy",
@@ -1875,7 +2055,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     existing.project = options.project;
     existing.excludeHosts = excludeHosts;
     existing.debug = Boolean(options.debug);
-    installProcessEnv(options.proxyUrl, excludeHosts, toolPolicy);
+    installProcessEnv(options.proxyUrl, excludeHosts, existing.toolPolicy);
     return () => uninstallHeadroomTransport();
   }
 
@@ -1888,13 +2068,14 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     debug: Boolean(options.debug),
     toolPolicy,
     toolPolicyInput: options.toolPolicy,
-    remotePolicyUrl,
-    remotePolicyToken,
+    remotePolicyUrl: selectedSource.remoteUrl,
+    remotePolicyToken: selectedSource.remoteToken,
     policyUnavailable,
     previousNodeOptions: process.env.NODE_OPTIONS,
     previousProxyUrlEnv: process.env[PROXY_ENV],
     previousExcludeHostsEnv: process.env[EXCLUDE_HOSTS_ENV],
     previousToolPolicyEnv: process.env[TOOL_POLICY_ENV],
+    previousToolPolicyValidUntilEnv: process.env[TOOL_POLICY_VALID_UNTIL_ENV],
     originalFetch: globalThis.fetch,
     originalHttpRequest: http.request,
     originalHttpGet: http.get,
@@ -1987,6 +2168,11 @@ export function uninstallHeadroomTransport(): void {
     delete process.env[TOOL_POLICY_ENV];
   } else {
     process.env[TOOL_POLICY_ENV] = state.previousToolPolicyEnv;
+  }
+  if (state.previousToolPolicyValidUntilEnv === undefined) {
+    delete process.env[TOOL_POLICY_VALID_UNTIL_ENV];
+  } else {
+    process.env[TOOL_POLICY_VALID_UNTIL_ENV] = state.previousToolPolicyValidUntilEnv;
   }
   setState(undefined);
 }

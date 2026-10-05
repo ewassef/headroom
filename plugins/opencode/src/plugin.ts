@@ -17,6 +17,7 @@ import {
   TOOL_POLICY_REFRESH_SECONDS_ENV,
   TOOL_POLICY_TOKEN_ENV,
   TOOL_POLICY_URL_ENV,
+  TOOL_POLICY_VALID_UNTIL_ENV,
 } from "./transport.js";
 
 export interface HeadroomOpenCodePluginOptions {
@@ -35,7 +36,6 @@ const DEFAULT_MAX_PENDING_PREFLIGHTS = 1_024;
 
 interface PendingPreflight {
   preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>;
-  args: Record<string, unknown>;
   ambiguous: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -76,7 +76,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   });
   await refreshHeadroomToolPolicy();
   const pendingPreflights = new Map<string, PendingPreflight>();
-  const retiredArgumentGraphs = new WeakSet<object>();
+  const seenCallKeys = new Set<string>();
   const pendingPreflightTtlMs = positiveInteger(
     pluginOptions.pendingPreflightTtlMs,
     DEFAULT_PENDING_PREFLIGHT_TTL_MS,
@@ -94,17 +94,16 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     if (!pending) return;
     pendingPreflights.delete(key);
     clearTimeout(pending.timer);
-    retiredArgumentGraphs.add(pending.args);
     acknowledgeUnknownNativeToolExecution(pending.preflight, reason);
   };
 
   const rememberPreflight = (
     key: string,
     preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>,
-    args: Record<string, unknown>,
   ): void => {
     finishUnknown(key, "call_replaced");
-    const ambiguous = retiredArgumentGraphs.has(args);
+    const ambiguous = seenCallKeys.has(key);
+    seenCallKeys.add(key);
     while (pendingPreflights.size >= maxPendingPreflights) {
       const oldestKey = pendingPreflights.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
@@ -115,7 +114,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       pendingPreflightTtlMs,
     );
     timer.unref?.();
-    pendingPreflights.set(key, { preflight, args, ambiguous, timer });
+    pendingPreflights.set(key, { preflight, ambiguous, timer });
   };
 
   const effectiveCwd = (args: Record<string, unknown>): string => {
@@ -172,7 +171,10 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       if (process.env[TOOL_POLICY_PATH_ENV]) {
         output.env[TOOL_POLICY_PATH_ENV] = process.env[TOOL_POLICY_PATH_ENV];
       }
-      for (const name of [TOOL_POLICY_REFRESH_SECONDS_ENV]) {
+      for (const name of [
+        TOOL_POLICY_REFRESH_SECONDS_ENV,
+        TOOL_POLICY_VALID_UNTIL_ENV,
+      ]) {
         if (process.env[name]) {
           output.env[name] = process.env[name];
         }
@@ -194,7 +196,6 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
         rememberPreflight(
           `${hookInput.sessionID}\0${hookInput.callID}`,
           preflight,
-          output.args,
         );
       }
     },
@@ -205,12 +206,6 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       if (pending.ambiguous) {
         finishUnknown(key, "ambiguous_reused_call");
         return;
-      }
-      if (pending.args !== hookInput.args) {
-        finishUnknown(key, "postflight_mismatch");
-        throw new Error(
-          "[headroom] OpenCode postflight arguments did not match the bound preflight object",
-        );
       }
       try {
         acknowledgeNativeToolExecution(
@@ -223,7 +218,6 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
             callID: hookInput.callID,
           },
         );
-        retiredArgumentGraphs.add(pending.args);
         pendingPreflights.delete(key);
         clearTimeout(pending.timer);
       } catch (error) {
