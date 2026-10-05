@@ -11,6 +11,7 @@ import {
   enforceNativeToolExecution,
   installHeadroomTransport,
   refreshHeadroomToolPolicy,
+  EXCLUDE_HOSTS_ENV,
   TOOL_POLICY_ENV,
   TOOL_POLICY_PATH_ENV,
   TOOL_POLICY_REFRESH_SECONDS_ENV,
@@ -21,6 +22,7 @@ import {
 export interface HeadroomOpenCodePluginOptions {
   proxyUrl?: string;
   project?: string;
+  excludeHosts?: string[];
   backend?: string;
   debug?: boolean;
   toolPolicy?: HeadroomToolPolicyConfig | string;
@@ -59,12 +61,16 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   const pluginOptions = options as HeadroomOpenCodePluginOptions;
   const proxyUrl = resolveProxyUrl(pluginOptions);
   const projectPath = input.worktree || input.directory;
-  const project = pluginOptions.project ?? input.project.id;
+  const project =
+    pluginOptions.project ??
+    (input.project as { id?: string } | undefined)?.id ??
+    input.directory;
   const retrieveTool = createHeadroomRetrieveTool({ proxyBaseUrl: proxyUrl });
   const uninstallTransport = installHeadroomTransport({
     proxyUrl,
     project,
     policyProject: projectPath,
+    excludeHosts: pluginOptions.excludeHosts,
     debug: pluginOptions.debug,
     toolPolicy: pluginOptions.toolPolicy,
   });
@@ -152,6 +158,11 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       output.env.HEADROOM_ACTIVE = "1";
       output.env.HEADROOM_PROXY_URL = proxyUrl;
       output.env.HEADROOM_PROJECT = project;
+      if (process.env[EXCLUDE_HOSTS_ENV]) {
+        output.env[EXCLUDE_HOSTS_ENV] = process.env[EXCLUDE_HOSTS_ENV];
+      } else {
+        delete output.env[EXCLUDE_HOSTS_ENV];
+      }
       if (pluginOptions.backend) {
         output.env.HEADROOM_BACKEND = pluginOptions.backend;
       }

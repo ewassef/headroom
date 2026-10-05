@@ -432,12 +432,149 @@ describe("Headroom OpenCode transport", () => {
     await proxy.close();
   });
 
-  it("blocks external http2 connections instead of leaking them", () => {
-    installHeadroomTransport({ proxyUrl: "http://127.0.0.1:8787/v1" });
+  it("evaluates policy but passes allowed HTTP/2 authorities through unchanged", () => {
+    const connectSpy = vi.spyOn(http2, "connect").mockImplementation(() => ({}) as never);
+    const auditSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      toolPolicy: {
+        defaultAction: "deny",
+        rules: [
+          {
+            id: "allow-openai-http2",
+            scope: "http",
+            action: "allow",
+            domain: "api.openai.com",
+          },
+        ],
+      },
+    });
 
-    expect(() => http2.connect("https://api.openai.com")).toThrow(
-      /blocked direct HTTP\/2 connection to api\.openai\.com/,
+    expect(() => http2.connect("https://api.openai.com")).not.toThrow();
+    expect(connectSpy).toHaveBeenCalledWith("https://api.openai.com");
+    expect(auditSpy.mock.calls.some(([entry]) => String(entry).includes("allow-openai-http2"))).toBe(true);
+  });
+
+  it("denies HTTP/2 authorities rejected by policy before connecting", () => {
+    const connectSpy = vi.spyOn(http2, "connect").mockImplementation(() => ({}) as never);
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      toolPolicy: {
+        rules: [
+          {
+            id: "deny-openai-http2",
+            scope: "http",
+            action: "deny",
+            domain: "api.openai.com",
+          },
+        ],
+      },
+    });
+
+    expect(() => http2.connect("https://api.openai.com")).toThrow(/deny-openai-http2/);
+    expect(connectSpy).not.toHaveBeenCalled();
+  });
+
+  it("passes non-LLM fetches through unchanged while still evaluating policy", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      toolPolicy: {
+        rules: [
+          {
+            id: "deny-webfetch",
+            scope: "http",
+            action: "deny",
+            domain: "example.com",
+          },
+        ],
+      },
+    });
+
+    await expect(fetch("https://example.com/docs")).rejects.toThrow(/deny-webfetch/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("checks policy for excluded hosts even though they bypass compression routing", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      excludeHosts: ["opencode.ai"],
+      toolPolicy: {
+        rules: [
+          {
+            id: "deny-excluded-provider",
+            scope: "http",
+            action: "deny",
+            domain: "opencode.ai",
+          },
+        ],
+      },
+    });
+
+    await expect(
+      fetch("https://opencode.ai/zen/v1/responses", { method: "POST" }),
+    ).rejects.toThrow(/deny-excluded-provider/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("routes only recognized LLM endpoints and honors excludeHosts", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (..._args: FetchCall) => new Response("ok"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      excludeHosts: ["opencode.ai"],
+    });
+
+    const init = { method: "POST" };
+    await fetch("https://api.openai.com/v1/responses", init);
+    await fetch("https://api.openai.com/v1/models", init);
+    await fetch("https://opencode.ai/zen/v1/responses", init);
+
+    expect(fetchMock.mock.calls[0][0]).toEqual(
+      new URL("http://127.0.0.1:8787/v1/responses"),
     );
+    expect(fetchMock.mock.calls[1]).toEqual(["https://api.openai.com/v1/models", init]);
+    expect(fetchMock.mock.calls[2]).toEqual([
+      "https://opencode.ai/zen/v1/responses",
+      init,
+    ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  it("propagates exclude hosts and hides child windows by default on Windows", () => {
+    const originalSpawn = childProcess.spawn;
+    const spawnMock = vi.fn(() => ({
+      on: vi.fn(),
+      once: vi.fn(),
+      emit: vi.fn(),
+      kill: vi.fn(),
+      killed: false,
+      pid: 123,
+    }));
+    childProcess.spawn = spawnMock as unknown as typeof childProcess.spawn;
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+    installHeadroomTransport({
+      proxyUrl: "http://127.0.0.1:8787/v1",
+      excludeHosts: ["opencode.ai"],
+    });
+    childProcess.spawn("node", ["agent.js"]);
+
+    const options = (spawnMock.mock.calls[0] as unknown[])[2] as {
+      env: NodeJS.ProcessEnv;
+      windowsHide: boolean;
+    };
+    expect(options.windowsHide).toBe(true);
+    expect(options.env.HEADROOM_OPENCODE_EXCLUDE_HOSTS).toBe("opencode.ai");
+    childProcess.spawn = originalSpawn;
   });
 
   it("preloads the Headroom shim into child Node processes", () => {

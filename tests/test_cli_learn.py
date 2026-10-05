@@ -65,7 +65,7 @@ class FakeAnalyzer:
         self.model = model
         self.calls: list[tuple[object, list[object]]] = []
 
-    def analyze(self, project, sessions):  # noqa: ANN001, ANN201
+    def analyze(self, project, sessions, on_progress=None):  # noqa: ANN001, ANN201
         self.calls.append((project, sessions))
         return SimpleNamespace(
             total_sessions=len(sessions),
@@ -110,6 +110,38 @@ def test_learn_exits_cleanly_when_model_detection_fails(
 
     assert result.exit_code == 1
     assert "Error: no model" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [
+        (["learn"], {"HEADROOM_LEARN_CLI": "agy"}),
+        (["learn", "--model", "agy-cli"], {}),
+    ],
+)
+def test_learn_agy_without_unsafe_opt_in_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, args: list[str], env: dict[str, str]
+) -> None:
+    for var in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "HEADROOM_LEARN_CLI",
+        "HEADROOM_LEARN_ALLOW_UNSAFE_AGY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    monkeypatch.setattr(
+        "headroom.learn.registry.auto_detect_plugins",
+        lambda: pytest.fail("sessions must not be scanned without the agy opt-in"),
+    )
+
+    result = runner.invoke(main, args, catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "HEADROOM_LEARN_ALLOW_UNSAFE_AGY=1" in result.output
 
 
 def test_learn_auto_agent_reports_no_detected_plugins(
@@ -174,6 +206,47 @@ def test_learn_project_lookup_and_apply_flow(
     assert plugin.scan_calls == [(matched, 4)]
     assert analyzer.calls[0][0] is matched
     assert plugin.writer.calls[0][2] is False
+
+
+class ProgressEchoingAnalyzer(FakeAnalyzer):
+    def analyze(self, project, sessions, on_progress=None):  # noqa: ANN001, ANN201
+        self.calls.append((project, sessions))
+        if on_progress is not None:
+            on_progress("session started")
+            on_progress("assistant responding, 5s")
+        return SimpleNamespace(
+            total_sessions=len(sessions),
+            total_calls=3,
+            total_failures=1,
+            failure_rate=1 / 3,
+            recommendations=[SimpleNamespace(section="Rules")],
+        )
+
+
+def test_learn_analyzing_line_gets_progress_detail_appended(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    project_path = tmp_path / "project-a"
+    project_path.mkdir()
+    matched = SimpleNamespace(name="project-a", project_path=project_path)
+    plugin = FakePlugin("codex", "Codex", [matched])
+    analyzer = ProgressEchoingAnalyzer()
+
+    monkeypatch.setattr("headroom.learn.analyzer._detect_default_model", lambda: "gpt-4o")
+    monkeypatch.setattr("headroom.learn.registry.get_plugin", lambda name: plugin)
+    monkeypatch.setattr("headroom.learn.analyzer.SessionAnalyzer", lambda model=None: analyzer)
+
+    result = runner.invoke(
+        main,
+        ["learn", "--agent", "codex", "--project", str(project_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "  Analyzing with gpt-4o... (session started)" in result.output
+    assert "  Analyzing with gpt-4o... (assistant responding, 5s)" in result.output
+    # Final result reporting still appears unmodified after the progress lines.
+    assert "Recommendations: 1" in result.output
 
 
 def test_verbosity_all_apply_aggregates_baselines_across_projects(
@@ -337,7 +410,7 @@ def test_learn_handles_empty_sessions_and_no_pattern_outputs(
             return [SimpleNamespace(events=["event"], tool_calls=[], failure_count=0)]
 
     class BranchingAnalyzer(FakeAnalyzer):
-        def analyze(self, project, sessions):  # noqa: ANN001, ANN201
+        def analyze(self, project, sessions, on_progress=None):  # noqa: ANN001, ANN201
             self.calls.append((project, sessions))
             if project is no_failures:
                 return SimpleNamespace(
@@ -377,7 +450,7 @@ def test_learn_surfaces_analysis_failure_and_exits_nonzero(
     plugin = FakePlugin("codex", "Codex", [project])
 
     class FailingAnalyzer(FakeAnalyzer):
-        def analyze(self, project, sessions):  # noqa: ANN001, ANN201
+        def analyze(self, project, sessions, *, on_progress=None):  # noqa: ANN001, ANN201
             self.calls.append((project, sessions))
             return SimpleNamespace(
                 total_sessions=1,

@@ -15,6 +15,7 @@ const BASE_URL_HEADER = "x-headroom-base-url";
 const ORIGINAL_PATH_HEADER = "x-headroom-original-path";
 const PROJECT_HEADER = "x-headroom-project";
 const PROXY_ENV = "HEADROOM_OPENCODE_TRANSPORT_PROXY_URL";
+export const EXCLUDE_HOSTS_ENV = "HEADROOM_OPENCODE_EXCLUDE_HOSTS";
 export const TOOL_POLICY_ENV = "HEADROOM_TOOL_POLICY_JSON";
 export const TOOL_POLICY_PATH_ENV = "HEADROOM_TOOL_POLICY_PATH";
 export const TOOL_POLICY_URL_ENV = "HEADROOM_TOOL_POLICY_URL";
@@ -69,6 +70,7 @@ interface InstallOptions {
   proxyUrl: string;
   project?: string;
   policyProject?: string;
+  excludeHosts?: string[];
   debug?: boolean;
   toolPolicy?: HeadroomToolPolicyInput;
 }
@@ -102,6 +104,7 @@ interface TransportState {
   policyContextKey: string;
   proxyUrl: string;
   project: string | undefined;
+  excludeHosts: string[];
   debug: boolean;
   toolPolicy?: CompiledToolPolicy;
   toolPolicyInput?: HeadroomToolPolicyInput;
@@ -110,6 +113,7 @@ interface TransportState {
   policyUnavailable?: string;
   previousNodeOptions?: string;
   previousProxyUrlEnv?: string;
+  previousExcludeHostsEnv?: string;
   previousToolPolicyEnv?: string;
   originalFetch: typeof fetch;
   originalHttpRequest: HttpRequest;
@@ -667,7 +671,7 @@ export async function refreshHeadroomToolPolicy(now = Date.now() / 1000): Promis
       now,
     );
     state.policyUnavailable = undefined;
-    installProcessEnv(state.proxyUrl, state.toolPolicy);
+    installProcessEnv(state.proxyUrl, state.excludeHosts, state.toolPolicy);
   } catch (error) {
     state.toolPolicy = undefined;
     state.policyUnavailable = error instanceof Error ? error.message : String(error);
@@ -677,12 +681,14 @@ export async function refreshHeadroomToolPolicy(now = Date.now() / 1000): Promis
 function withShimEnv(
   env: NodeJS.ProcessEnv | Record<string, unknown> | undefined,
   proxyUrl: string,
+  excludeHosts: string[],
   toolPolicy: CompiledToolPolicy | undefined,
 ): NodeJS.ProcessEnv {
   const nextEnv = { ...(env ?? process.env) } as NodeJS.ProcessEnv;
   delete nextEnv[TOOL_POLICY_TOKEN_ENV];
   delete nextEnv[TOOL_POLICY_URL_ENV];
   nextEnv[PROXY_ENV] = proxyUrl;
+  withExcludeHostsEnv(nextEnv, excludeHosts);
   if (toolPolicy) {
     nextEnv[TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
@@ -695,8 +701,21 @@ function withShimEnv(
   return nextEnv;
 }
 
-function installProcessEnv(proxyUrl: string, toolPolicy: CompiledToolPolicy | undefined): void {
+function withExcludeHostsEnv(env: NodeJS.ProcessEnv, excludeHosts: string[]): void {
+  if (excludeHosts.length > 0) {
+    env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
+  } else {
+    delete env[EXCLUDE_HOSTS_ENV];
+  }
+}
+
+function installProcessEnv(
+  proxyUrl: string,
+  excludeHosts: string[],
+  toolPolicy: CompiledToolPolicy | undefined,
+): void {
   process.env[PROXY_ENV] = proxyUrl;
+  withExcludeHostsEnv(process.env, excludeHosts);
   if (toolPolicy) {
     process.env[TOOL_POLICY_ENV] = toolPolicy.serialized;
   } else {
@@ -717,7 +736,15 @@ function injectOptionsEnv(args: unknown[], optionIndex: number, proxyUrl: string
   const nextArgs = [...args];
   const callback = typeof nextArgs.at(-1) === "function" ? nextArgs.pop() : undefined;
   const existing = isOptions(nextArgs[optionIndex]) ? { ...(nextArgs[optionIndex] as Record<string, unknown>) } : {};
-  existing.env = withShimEnv(existing.env as NodeJS.ProcessEnv | undefined, proxyUrl, state?.toolPolicy);
+  existing.env = withShimEnv(
+    existing.env as NodeJS.ProcessEnv | undefined,
+    proxyUrl,
+    state?.excludeHosts ?? [],
+    state?.toolPolicy,
+  );
+  if (process.platform === "win32" && existing.windowsHide === undefined) {
+    existing.windowsHide = true;
+  }
 
   if (isOptions(nextArgs[optionIndex])) {
     nextArgs[optionIndex] = existing;
@@ -1506,7 +1533,33 @@ function isLoopback(hostname: string): boolean {
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
-function shouldRoute(url: URL, proxy: URL): boolean {
+function normalizeExcludeHosts(entries: string | Iterable<unknown>): string[] {
+  const hosts = new Set<string>();
+  for (const entry of typeof entries === "string" ? entries.split(",") : entries) {
+    const host = String(entry).trim().toLowerCase().replace(/^(\*\.|\.)/, "");
+    if (host) {
+      hosts.add(host);
+    }
+  }
+  return [...hosts];
+}
+
+function isExcludedHost(hostname: string, excludeHosts: string[]): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return excludeHosts.some((host) => normalized === host || normalized.endsWith(`.${host}`));
+}
+
+function isLlmEndpointPath(pathname: string): boolean {
+  return (
+    pathname.endsWith("/chat/completions") ||
+    pathname.endsWith("/responses") ||
+    pathname.endsWith("/messages") ||
+    pathname.endsWith(":generateContent") ||
+    pathname.endsWith(":streamGenerateContent")
+  );
+}
+
+function shouldRoute(url: URL, proxy: URL, excludeHosts: string[]): boolean {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return false;
   }
@@ -1516,7 +1569,10 @@ function shouldRoute(url: URL, proxy: URL): boolean {
   if (url.origin === proxy.origin) {
     return false;
   }
-  return true;
+  if (isExcludedHost(url.hostname, excludeHosts)) {
+    return false;
+  }
+  return isLlmEndpointPath(url.pathname);
 }
 
 function routedUrl(upstream: URL, proxy: URL): URL {
@@ -1582,9 +1638,15 @@ function mergeFetchHeaders(
   return headers;
 }
 
-function withRoutedFetchInput(input: RequestInfo | URL, init: RequestInit | undefined, proxy: URL, project: string | undefined): FetchArgs {
+function withRoutedFetchInput(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  proxy: URL,
+  project: string | undefined,
+  excludeHosts: string[],
+): FetchArgs {
   const upstream = requestUrl(input);
-  if (!shouldRoute(upstream, proxy)) {
+  if (!shouldRoute(upstream, proxy, excludeHosts)) {
     return [input, init];
   }
 
@@ -1667,8 +1729,13 @@ function headersForNodeRequest(
   return result;
 }
 
-function routedNodeOptions(parts: NodeRequestParts, proxy: URL, project: string | undefined): Record<string, unknown> | undefined {
-  if (!parts.url || !shouldRoute(parts.url, proxy)) {
+function routedNodeOptions(
+  parts: NodeRequestParts,
+  proxy: URL,
+  project: string | undefined,
+  excludeHosts: string[],
+): Record<string, unknown> | undefined {
+  if (!parts.url || !shouldRoute(parts.url, proxy, excludeHosts)) {
     return undefined;
   }
 
@@ -1724,7 +1791,7 @@ function wrapRequest(
         url: parts.url,
       });
     }
-    const nextOptions = routedNodeOptions(parts, proxy, state.project);
+    const nextOptions = routedNodeOptions(parts, proxy, state.project, state.excludeHosts);
     if (!nextOptions) {
       return Reflect.apply(originalRequest, this, args);
     }
@@ -1747,25 +1814,21 @@ function wrapHttp2Connect(originalConnect: Http2Connect): Http2Connect {
   return function headroomHttp2Connect(this: unknown, authority: string | URL, ...args: unknown[]) {
     const state = getState();
     if (state) {
-      const proxy = normalizeProxyUrl(state.proxyUrl);
       const upstream = authority instanceof URL ? authority : new URL(String(authority));
       enforcePolicy(state.toolPolicy, {
         scope: "http",
         resource: upstream.href,
         url: upstream,
       });
-      if (shouldRoute(upstream, proxy)) {
-        throw new Error(
-          `Headroom OpenCode wrap blocked direct HTTP/2 connection to ${upstream.hostname}. ` +
-            "Use fetch, http, or https so traffic can be routed through Headroom.",
-        );
-      }
     }
     return Reflect.apply(originalConnect, this, [authority, ...args]);
   } as Http2Connect;
 }
 
 export function installHeadroomTransport(options: InstallOptions): () => void {
+  const excludeHosts = normalizeExcludeHosts(
+    options.excludeHosts ?? process.env[EXCLUDE_HOSTS_ENV] ?? "",
+  );
   const existing = getState();
   const remotePolicyUrl =
     options.toolPolicy === undefined
@@ -1810,8 +1873,9 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     existing.refs += 1;
     existing.proxyUrl = options.proxyUrl;
     existing.project = options.project;
+    existing.excludeHosts = excludeHosts;
     existing.debug = Boolean(options.debug);
-    installProcessEnv(options.proxyUrl, toolPolicy);
+    installProcessEnv(options.proxyUrl, excludeHosts, toolPolicy);
     return () => uninstallHeadroomTransport();
   }
 
@@ -1820,6 +1884,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     policyContextKey,
     proxyUrl: options.proxyUrl,
     project: options.project,
+    excludeHosts,
     debug: Boolean(options.debug),
     toolPolicy,
     toolPolicyInput: options.toolPolicy,
@@ -1828,6 +1893,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     policyUnavailable,
     previousNodeOptions: process.env.NODE_OPTIONS,
     previousProxyUrlEnv: process.env[PROXY_ENV],
+    previousExcludeHostsEnv: process.env[EXCLUDE_HOSTS_ENV],
     previousToolPolicyEnv: process.env[TOOL_POLICY_ENV],
     originalFetch: globalThis.fetch,
     originalHttpRequest: http.request,
@@ -1842,7 +1908,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
   };
 
   setState(state);
-  installProcessEnv(options.proxyUrl, toolPolicy);
+  installProcessEnv(options.proxyUrl, excludeHosts, toolPolicy);
   globalThis.fetch = async (...args: FetchArgs) => {
     const current = getState();
     if (!current) {
@@ -1856,7 +1922,13 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
       url: upstream,
     });
     const proxy = normalizeProxyUrl(current.proxyUrl);
-    const [nextInput, nextInit] = withRoutedFetchInput(args[0], args[1], proxy, current.project);
+    const [nextInput, nextInit] = withRoutedFetchInput(
+      args[0],
+      args[1],
+      proxy,
+      current.project,
+      current.excludeHosts,
+    );
     return state.originalFetch(nextInput, nextInit);
   };
 
@@ -1905,6 +1977,11 @@ export function uninstallHeadroomTransport(): void {
     delete process.env[PROXY_ENV];
   } else {
     process.env[PROXY_ENV] = state.previousProxyUrlEnv;
+  }
+  if (state.previousExcludeHostsEnv === undefined) {
+    delete process.env[EXCLUDE_HOSTS_ENV];
+  } else {
+    process.env[EXCLUDE_HOSTS_ENV] = state.previousExcludeHostsEnv;
   }
   if (state.previousToolPolicyEnv === undefined) {
     delete process.env[TOOL_POLICY_ENV];

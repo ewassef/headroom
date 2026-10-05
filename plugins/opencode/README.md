@@ -26,6 +26,35 @@ The policy adapter follows the external-plugin design discussed in
 Policy enforcement is optional. With no policy configured, existing OpenCode tool
 behavior is unchanged.
 
+### Model routing and exclusions
+
+The transport routes only recognized LLM generation endpoints through Headroom:
+OpenAI-compatible `/chat/completions` and `/responses`, Anthropic-compatible
+`/messages`, and Gemini `:generateContent` / `:streamGenerateContent` endpoints.
+Other traffic—including WebFetch, package registries, GitHub, model-listing
+endpoints, and unknown paths—continues to its original destination unchanged.
+
+Use `excludeHosts` to keep a provider host and all its subdomains off the compression
+proxy:
+
+```ts
+return HeadroomPlugin(input, {
+  excludeHosts: ["opencode.ai", ".corp.internal"],
+});
+```
+
+`.example.com` and `*.example.com` are accepted as spellings of `example.com`.
+Alternatively, set a comma-separated environment variable before launching OpenCode:
+
+```bash
+HEADROOM_OPENCODE_EXCLUDE_HOSTS="opencode.ai,.corp.internal" opencode
+```
+
+Routing and policy are independent. Excluded, non-LLM, loopback, and direct HTTP/2
+destinations still receive configured HTTP policy evaluation. After an allow decision,
+HTTP/2 connections pass through unchanged because the authority alone does not reveal
+whether a later stream is model traffic.
+
 ## Getting started
 
 ### Prerequisites
@@ -41,7 +70,7 @@ Create `.opencode/package.json` in your project:
 ```json
 {
   "dependencies": {
-    "headroom-opencode": "^0.37.0"
+    "headroom-opencode": "^0.39.1"
   }
 }
 ```
@@ -517,6 +546,19 @@ console.log(provider.provider.headroom.npm);
 console.log(config.model);
 ```
 
+## Models
+
+| Model | Context | Output |
+|---|---:|---:|
+| `claude-sonnet-4-6` | 200K | 16K |
+| `claude-opus-4-6` | 200K | 16K |
+| `claude-haiku-4-5-20251001` | 200K | 8K |
+| `gpt-4o` | 128K | 16K |
+| `gpt-4.1` | 1M | 32K |
+
+The generated provider exposes these as `headroom/<model>` and defaults to
+`headroom/claude-sonnet-4-6`.
+
 ## Retrieve and compression helpers
 
 ```ts
@@ -547,6 +589,7 @@ console.log(`Saved ${compressed.tokensSaved} tokens`);
 |---|---|
 | `HEADROOM_PROXY_URL` | Proxy URL used by `HeadroomPlugin`. |
 | `HEADROOM_BASE_URL` | Backward-compatible proxy URL fallback when `HEADROOM_PROXY_URL` is unset. |
+| `HEADROOM_OPENCODE_EXCLUDE_HOSTS` | Comma-separated hosts and subdomains that bypass compression routing; the `excludeHosts` option takes precedence. |
 | `HEADROOM_TOOL_POLICY_JSON` | Inline JSON policy document. |
 | `HEADROOM_TOOL_POLICY_PATH` | Path to a policy JSON file. |
 | `HEADROOM_TOOL_POLICY_URL` | HTTPS endpoint returning policy JSON. |
