@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 
@@ -33,6 +34,8 @@ export interface HeadroomOpenCodePluginOptions {
 
 const DEFAULT_PENDING_PREFLIGHT_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_MAX_PENDING_PREFLIGHTS = 1_024;
+const RETIRED_CALL_FILTER_BITS = 1 << 20;
+const RETIRED_CALL_FILTER_HASHES = 7;
 
 interface PendingPreflight {
   preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>;
@@ -46,6 +49,17 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 
 function normalizeProxyUrl(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+function retiredCallFilterIndexes(key: string): number[] {
+  const digest = createHash("sha256").update(key).digest();
+  const first = digest.readUInt32LE(0);
+  const second = (digest.readUInt32LE(4) | 1) >>> 0;
+  return Array.from(
+    { length: RETIRED_CALL_FILTER_HASHES },
+    (_, index) =>
+      ((first + Math.imul(index, second)) >>> 0) % RETIRED_CALL_FILTER_BITS,
+  );
 }
 
 function resolveProxyUrl(options?: HeadroomOpenCodePluginOptions): string {
@@ -76,7 +90,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   });
   await refreshHeadroomToolPolicy();
   const pendingPreflights = new Map<string, PendingPreflight>();
-  const retiredCallKeys = new Map<string, ReturnType<typeof setTimeout>>();
+  const retiredCallFilter = new Uint32Array(RETIRED_CALL_FILTER_BITS >>> 5);
   const pendingPreflightTtlMs = positiveInteger(
     pluginOptions.pendingPreflightTtlMs,
     DEFAULT_PENDING_PREFLIGHT_TTL_MS,
@@ -86,22 +100,15 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     DEFAULT_MAX_PENDING_PREFLIGHTS,
   );
 
+  const hasRetiredCallKey = (key: string): boolean =>
+    retiredCallFilterIndexes(key).every(
+      (bit) => (retiredCallFilter[bit >>> 5] & (1 << (bit & 31))) !== 0,
+    );
+
   const retireCallKey = (key: string): void => {
-    const existingTimer = retiredCallKeys.get(key);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-      retiredCallKeys.delete(key);
+    for (const bit of retiredCallFilterIndexes(key)) {
+      retiredCallFilter[bit >>> 5] |= 1 << (bit & 31);
     }
-    while (retiredCallKeys.size >= maxPendingPreflights) {
-      const oldestKey = retiredCallKeys.keys().next().value as string | undefined;
-      if (oldestKey === undefined) break;
-      const oldestTimer = retiredCallKeys.get(oldestKey);
-      if (oldestTimer) clearTimeout(oldestTimer);
-      retiredCallKeys.delete(oldestKey);
-    }
-    const timer = setTimeout(() => retiredCallKeys.delete(key), pendingPreflightTtlMs);
-    timer.unref?.();
-    retiredCallKeys.set(key, timer);
   };
 
   const finishUnknown = (
@@ -121,7 +128,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>,
   ): void => {
     finishUnknown(key, "call_replaced");
-    const ambiguous = retiredCallKeys.has(key);
+    const ambiguous = hasRetiredCallKey(key);
     while (pendingPreflights.size >= maxPendingPreflights) {
       const oldestKey = pendingPreflights.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
@@ -154,10 +161,6 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       for (const key of [...pendingPreflights.keys()]) {
         finishUnknown(key, "plugin_disposed");
       }
-      for (const timer of retiredCallKeys.values()) {
-        clearTimeout(timer);
-      }
-      retiredCallKeys.clear();
       uninstallTransport();
     },
     tool: {

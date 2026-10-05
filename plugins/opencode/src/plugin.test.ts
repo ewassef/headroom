@@ -344,7 +344,7 @@ describe("HeadroomPlugin", () => {
     await plugin.dispose?.();
   });
 
-  it("expires retired call correlation metadata", async () => {
+  it("never forgets retired call identities when the TTL expires", async () => {
     vi.useFakeTimers();
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
@@ -374,14 +374,15 @@ describe("HeadroomPlugin", () => {
         .filter(
           (record) => record.event === "headroom_tool_policy_enforcement_acknowledgement",
         );
-      expect(acknowledgements.map((record) => record.effect)).toEqual(["allowed", "allowed"]);
+      expect(acknowledgements.map((record) => record.effect)).toEqual(["allowed", "unknown"]);
+      expect(acknowledgements[1].reason).toBe("ambiguous_reused_call");
       await plugin.dispose?.();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("bounds retired call correlation metadata", async () => {
+  it("preserves retired call identities beyond the pending capacity", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const plugin = await HeadroomPlugin(pluginInput(), {
       proxyUrl: "http://127.0.0.1:8787",
@@ -421,8 +422,49 @@ describe("HeadroomPlugin", () => {
       "allowed",
       "allowed",
       "allowed",
-      "allowed",
+      "unknown",
     ]);
+    expect(acknowledgements[3].reason).toBe("ambiguous_reused_call");
+    await plugin.dispose?.();
+  });
+
+  it("does not let a late completion acknowledge a reused identity after eviction", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const plugin = await HeadroomPlugin(pluginInput(), {
+      proxyUrl: "http://127.0.0.1:8787",
+      toolPolicy: { rules: [] },
+      maxPendingPreflights: 1,
+    });
+    const first = { tool: "bash", sessionID: "session-generation", callID: "call-a" };
+    const other = { tool: "bash", sessionID: "session-generation", callID: "call-b" };
+    const args = { command: "echo same" };
+
+    await plugin["tool.execute.before"]?.(first, { args: { ...args } });
+    await plugin["tool.execute.before"]?.(other, { args: { command: "echo other" } });
+    await plugin["tool.execute.after"]?.(
+      { ...other, args: { command: "echo other" } },
+      { title: "shell", output: "other", metadata: {} },
+    );
+    await plugin["tool.execute.before"]?.(first, { args: { ...args } });
+    await plugin["tool.execute.after"]?.(
+      { ...first, args: { ...args } },
+      { title: "shell", output: "late", metadata: {} },
+    );
+
+    const acknowledgements = stderr.mock.calls
+      .map(([value]) => String(value).trim())
+      .filter((value) => value.startsWith("{"))
+      .map((value) => JSON.parse(value) as Record<string, unknown>)
+      .filter(
+        (record) => record.event === "headroom_tool_policy_enforcement_acknowledgement",
+      );
+    expect(acknowledgements.map((record) => record.effect)).toEqual([
+      "unknown",
+      "allowed",
+      "unknown",
+    ]);
+    expect(acknowledgements[0].reason).toBe("capacity_evicted");
+    expect(acknowledgements[2].reason).toBe("ambiguous_reused_call");
     await plugin.dispose?.();
   });
 
