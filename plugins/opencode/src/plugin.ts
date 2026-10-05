@@ -76,7 +76,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   });
   await refreshHeadroomToolPolicy();
   const pendingPreflights = new Map<string, PendingPreflight>();
-  const seenCallKeys = new Set<string>();
+  const retiredCallKeys = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingPreflightTtlMs = positiveInteger(
     pluginOptions.pendingPreflightTtlMs,
     DEFAULT_PENDING_PREFLIGHT_TTL_MS,
@@ -86,6 +86,24 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     DEFAULT_MAX_PENDING_PREFLIGHTS,
   );
 
+  const retireCallKey = (key: string): void => {
+    const existingTimer = retiredCallKeys.get(key);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      retiredCallKeys.delete(key);
+    }
+    while (retiredCallKeys.size >= maxPendingPreflights) {
+      const oldestKey = retiredCallKeys.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      const oldestTimer = retiredCallKeys.get(oldestKey);
+      if (oldestTimer) clearTimeout(oldestTimer);
+      retiredCallKeys.delete(oldestKey);
+    }
+    const timer = setTimeout(() => retiredCallKeys.delete(key), pendingPreflightTtlMs);
+    timer.unref?.();
+    retiredCallKeys.set(key, timer);
+  };
+
   const finishUnknown = (
     key: string,
     reason: NonNullable<Parameters<typeof acknowledgeUnknownNativeToolExecution>[1]>,
@@ -94,6 +112,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     if (!pending) return;
     pendingPreflights.delete(key);
     clearTimeout(pending.timer);
+    retireCallKey(key);
     acknowledgeUnknownNativeToolExecution(pending.preflight, reason);
   };
 
@@ -102,8 +121,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>,
   ): void => {
     finishUnknown(key, "call_replaced");
-    const ambiguous = seenCallKeys.has(key);
-    seenCallKeys.add(key);
+    const ambiguous = retiredCallKeys.has(key);
     while (pendingPreflights.size >= maxPendingPreflights) {
       const oldestKey = pendingPreflights.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
@@ -136,6 +154,10 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
       for (const key of [...pendingPreflights.keys()]) {
         finishUnknown(key, "plugin_disposed");
       }
+      for (const timer of retiredCallKeys.values()) {
+        clearTimeout(timer);
+      }
+      retiredCallKeys.clear();
       uninstallTransport();
     },
     tool: {
@@ -220,6 +242,7 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
         );
         pendingPreflights.delete(key);
         clearTimeout(pending.timer);
+        retireCallKey(key);
       } catch (error) {
         finishUnknown(key, "postflight_mismatch");
         throw error;

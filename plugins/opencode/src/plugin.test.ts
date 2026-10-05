@@ -344,6 +344,88 @@ describe("HeadroomPlugin", () => {
     await plugin.dispose?.();
   });
 
+  it("expires retired call correlation metadata", async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const plugin = await HeadroomPlugin(pluginInput(), {
+        proxyUrl: "http://127.0.0.1:8787",
+        toolPolicy: { rules: [] },
+        pendingPreflightTtlMs: 25,
+      });
+      const input = { tool: "bash", sessionID: "session-expired", callID: "call-expired" };
+
+      await plugin["tool.execute.before"]?.(input, { args: { command: "echo first" } });
+      await plugin["tool.execute.after"]?.(
+        { ...input, args: { command: "echo first" } },
+        { title: "shell", output: "first", metadata: {} },
+      );
+      await vi.advanceTimersByTimeAsync(25);
+      await plugin["tool.execute.before"]?.(input, { args: { command: "echo second" } });
+      await plugin["tool.execute.after"]?.(
+        { ...input, args: { command: "echo second" } },
+        { title: "shell", output: "second", metadata: {} },
+      );
+
+      const acknowledgements = stderr.mock.calls
+        .map(([value]) => String(value).trim())
+        .filter((value) => value.startsWith("{"))
+        .map((value) => JSON.parse(value) as Record<string, unknown>)
+        .filter(
+          (record) => record.event === "headroom_tool_policy_enforcement_acknowledgement",
+        );
+      expect(acknowledgements.map((record) => record.effect)).toEqual(["allowed", "allowed"]);
+      await plugin.dispose?.();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds retired call correlation metadata", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const plugin = await HeadroomPlugin(pluginInput(), {
+      proxyUrl: "http://127.0.0.1:8787",
+      toolPolicy: { rules: [] },
+      maxPendingPreflights: 2,
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+      const input = { tool: "bash", sessionID: "session-retired-bound", callID: `call-${index}` };
+      const args = { command: `echo ${index}` };
+      await plugin["tool.execute.before"]?.(input, { args });
+      await plugin["tool.execute.after"]?.(
+        { ...input, args: { ...args } },
+        { title: "shell", output: String(index), metadata: {} },
+      );
+    }
+
+    const evictedInput = {
+      tool: "bash",
+      sessionID: "session-retired-bound",
+      callID: "call-0",
+    };
+    await plugin["tool.execute.before"]?.(evictedInput, { args: { command: "echo again" } });
+    await plugin["tool.execute.after"]?.(
+      { ...evictedInput, args: { command: "echo again" } },
+      { title: "shell", output: "again", metadata: {} },
+    );
+
+    const acknowledgements = stderr.mock.calls
+      .map(([value]) => String(value).trim())
+      .filter((value) => value.startsWith("{"))
+      .map((value) => JSON.parse(value) as Record<string, unknown>)
+      .filter(
+        (record) => record.event === "headroom_tool_policy_enforcement_acknowledgement",
+      );
+    expect(acknowledgements.map((record) => record.effect)).toEqual([
+      "allowed",
+      "allowed",
+      "allowed",
+      "allowed",
+    ]);
+    await plugin.dispose?.();
+  });
+
   it("blocks native shell tools using the filesystem project directory", async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "headroom-native-policy-"));
     const previousConfigDir = process.env.HEADROOM_CONFIG_DIR;
