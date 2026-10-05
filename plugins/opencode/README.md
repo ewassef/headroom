@@ -489,9 +489,10 @@ expiring store:
 It distinguishes an unobserved postflight from a bypassed or missing record without
 claiming an effect the host did not expose.
 
-Because OpenCode does not expose a generation identifier, the adapter keeps retired
-session/call identities in a fixed-size, non-forgetting filter. Filter collisions can
-only make acknowledgements more conservative (`unknown`); they cannot produce a false
+Because OpenCode does not expose a generation identifier, the adapter keeps up to
+65,536 retired session/call identity fingerprints. The limit is configurable with
+`maxRetiredCallIdentities`. Once exhausted, the adapter permanently treats subsequent
+identities as ambiguous and emits `unknown`; it never evicts history or risks a false
 `allowed` outcome for a reused identity.
 
 The bounds can be tuned in the wrapper:

@@ -468,6 +468,46 @@ describe("HeadroomPlugin", () => {
     await plugin.dispose?.();
   });
 
+  it("fails closed deterministically when retired identity capacity is exhausted", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const plugin = await HeadroomPlugin(pluginInput(), {
+      proxyUrl: "http://127.0.0.1:8787",
+      toolPolicy: { rules: [] },
+      maxRetiredCallIdentities: 2,
+    });
+
+    for (let index = 0; index < 4; index += 1) {
+      const input = {
+        tool: "bash",
+        sessionID: "session-history-capacity",
+        callID: `call-${index}`,
+      };
+      await plugin["tool.execute.before"]?.(input, {
+        args: { command: `echo ${index}` },
+      });
+      await plugin["tool.execute.after"]?.(
+        { ...input, args: { command: `echo ${index}` } },
+        { title: "shell", output: String(index), metadata: {} },
+      );
+    }
+
+    const acknowledgements = stderr.mock.calls
+      .map(([value]) => String(value).trim())
+      .filter((value) => value.startsWith("{"))
+      .map((value) => JSON.parse(value) as Record<string, unknown>)
+      .filter(
+        (record) => record.event === "headroom_tool_policy_enforcement_acknowledgement",
+      );
+    expect(acknowledgements.map((record) => record.effect)).toEqual([
+      "allowed",
+      "allowed",
+      "allowed",
+      "unknown",
+    ]);
+    expect(acknowledgements[3].reason).toBe("ambiguous_reused_call");
+    await plugin.dispose?.();
+  });
+
   it("blocks native shell tools using the filesystem project directory", async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "headroom-native-policy-"));
     const previousConfigDir = process.env.HEADROOM_CONFIG_DIR;

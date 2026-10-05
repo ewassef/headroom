@@ -30,12 +30,12 @@ export interface HeadroomOpenCodePluginOptions {
   toolPolicy?: HeadroomToolPolicyConfig | string;
   pendingPreflightTtlMs?: number;
   maxPendingPreflights?: number;
+  maxRetiredCallIdentities?: number;
 }
 
 const DEFAULT_PENDING_PREFLIGHT_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_MAX_PENDING_PREFLIGHTS = 1_024;
-const RETIRED_CALL_FILTER_BITS = 1 << 20;
-const RETIRED_CALL_FILTER_HASHES = 7;
+const DEFAULT_MAX_RETIRED_CALL_IDENTITIES = 65_536;
 
 interface PendingPreflight {
   preflight: NonNullable<Awaited<ReturnType<typeof enforceNativeToolExecution>>>;
@@ -51,15 +51,8 @@ function normalizeProxyUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
-function retiredCallFilterIndexes(key: string): number[] {
-  const digest = createHash("sha256").update(key).digest();
-  const first = digest.readUInt32LE(0);
-  const second = (digest.readUInt32LE(4) | 1) >>> 0;
-  return Array.from(
-    { length: RETIRED_CALL_FILTER_HASHES },
-    (_, index) =>
-      ((first + Math.imul(index, second)) >>> 0) % RETIRED_CALL_FILTER_BITS,
-  );
+function retiredCallFingerprint(key: string): string {
+  return createHash("sha256").update(key).digest("hex").slice(0, 32);
 }
 
 function resolveProxyUrl(options?: HeadroomOpenCodePluginOptions): string {
@@ -90,7 +83,8 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
   });
   await refreshHeadroomToolPolicy();
   const pendingPreflights = new Map<string, PendingPreflight>();
-  const retiredCallFilter = new Uint32Array(RETIRED_CALL_FILTER_BITS >>> 5);
+  const retiredCallFingerprints = new Set<string>();
+  let retiredCallHistoryExhausted = false;
   const pendingPreflightTtlMs = positiveInteger(
     pluginOptions.pendingPreflightTtlMs,
     DEFAULT_PENDING_PREFLIGHT_TTL_MS,
@@ -99,16 +93,24 @@ export const HeadroomPlugin: Plugin = async (input, options = {}) => {
     pluginOptions.maxPendingPreflights,
     DEFAULT_MAX_PENDING_PREFLIGHTS,
   );
+  const maxRetiredCallIdentities = positiveInteger(
+    pluginOptions.maxRetiredCallIdentities,
+    DEFAULT_MAX_RETIRED_CALL_IDENTITIES,
+  );
 
   const hasRetiredCallKey = (key: string): boolean =>
-    retiredCallFilterIndexes(key).every(
-      (bit) => (retiredCallFilter[bit >>> 5] & (1 << (bit & 31))) !== 0,
-    );
+    retiredCallHistoryExhausted ||
+    retiredCallFingerprints.has(retiredCallFingerprint(key));
 
   const retireCallKey = (key: string): void => {
-    for (const bit of retiredCallFilterIndexes(key)) {
-      retiredCallFilter[bit >>> 5] |= 1 << (bit & 31);
+    if (retiredCallHistoryExhausted) return;
+    const fingerprint = retiredCallFingerprint(key);
+    if (retiredCallFingerprints.has(fingerprint)) return;
+    if (retiredCallFingerprints.size >= maxRetiredCallIdentities) {
+      retiredCallHistoryExhausted = true;
+      return;
     }
+    retiredCallFingerprints.add(fingerprint);
   };
 
   const finishUnknown = (
