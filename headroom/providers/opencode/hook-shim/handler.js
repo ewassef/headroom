@@ -750,21 +750,25 @@ function hasDynamicShellExecution(commandLine) {
       percentStart = -1;
     }
     if (quote === "'") {
+      delayedExpansionState = 0;
       visible += " ";
       if (char === "'") quote = "";
       continue;
     }
     if (char === "'") {
+      delayedExpansionState = 0;
       quote = "'";
       visible += " ";
       continue;
     }
     if (char === '"') {
+      delayedExpansionState = 0;
       quote = quote === '"' ? "" : '"';
       visible += " ";
       continue;
     }
     if (char === "\\") {
+      delayedExpansionState = 0;
       const next = commandLine[index + 1];
       if (quote !== '"' && next && /[A-Za-z0-9]/.test(next)) return true;
       visible += "  ";
