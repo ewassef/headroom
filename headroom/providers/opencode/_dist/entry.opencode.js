@@ -13221,16 +13221,24 @@ var DYNAMIC_COMMANDS = /* @__PURE__ */ new Set([
   "until",
   "while"
 ]);
-function hasDynamicShellExecution(commandLine) {
+function hasDynamicShellExecution(commandLine, toolName) {
+  const normalizedTool = normalizedCommandName(toolName ?? "");
+  const cmdDelayedExpansion = normalizedTool === "cmd" || normalizedTool === "shell" && process.platform === "win32";
   let quote = "";
+  let cmdDelayedExpansionStart = -1;
   let delayedExpansionState = 0;
   let percentStart = -1;
   let visible = "";
   for (let index = 0; index < commandLine.length; index += 1) {
     const char = commandLine[index];
     if (char === "\r" || char === "\n") {
+      cmdDelayedExpansionStart = -1;
       delayedExpansionState = 0;
       percentStart = -1;
+    }
+    if (cmdDelayedExpansion && char === "!") {
+      if (cmdDelayedExpansionStart >= 0 && index > cmdDelayedExpansionStart + 1) return true;
+      cmdDelayedExpansionStart = index;
     }
     if (quote === "'") {
       delayedExpansionState = 0;
@@ -13429,7 +13437,7 @@ function evaluatePolicy(policy, input, authority = "advisory", binding) {
   }
   const dynamicShellExecution = input.scope === "shell" && !input.atomicCommand && (policy.defaultAction === "deny" || policy.rules.some(
     (rule) => rule.action !== "allow" && (rule.scope === "shell" || rule.scope === "tool_call")
-  )) && hasDynamicShellExecution(input.resource);
+  )) && hasDynamicShellExecution(input.resource, input.toolName);
   const matchedRule = policy.rules.find((rule) => {
     if (input.scope === "tool_call" && rule.scope !== "tool_call" || input.scope !== "tool_call" && rule.scope !== "tool_call" && rule.scope !== input.scope) {
       return false;
@@ -13618,7 +13626,9 @@ function acknowledgeUnknownNativeToolExecution(preflight, reason) {
 }
 function nativePolicyInput(toolName, args, cwd) {
   const stableArgs = stableJson(args);
-  if (!["bash", "shell", "powershell", "sh"].includes(toolName.toLowerCase())) {
+  if (!["bash", "cmd", "powershell", "pwsh", "sh", "shell"].includes(
+    normalizedCommandName(toolName)
+  )) {
     return {
       scope: "tool_call",
       resource: `${toolName} ${stableArgs}`,

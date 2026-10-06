@@ -1050,16 +1050,25 @@ const DYNAMIC_COMMANDS = new Set([
   "while",
 ]);
 
-function hasDynamicShellExecution(commandLine: string): boolean {
+function hasDynamicShellExecution(commandLine: string, toolName?: string): boolean {
+  const normalizedTool = normalizedCommandName(toolName ?? "");
+  const cmdDelayedExpansion =
+    normalizedTool === "cmd" || (normalizedTool === "shell" && process.platform === "win32");
   let quote: "'" | '"' | "" = "";
+  let cmdDelayedExpansionStart = -1;
   let delayedExpansionState = 0;
   let percentStart = -1;
   let visible = "";
   for (let index = 0; index < commandLine.length; index += 1) {
     const char = commandLine[index];
     if (char === "\r" || char === "\n") {
+      cmdDelayedExpansionStart = -1;
       delayedExpansionState = 0;
       percentStart = -1;
+    }
+    if (cmdDelayedExpansion && char === "!") {
+      if (cmdDelayedExpansionStart >= 0 && index > cmdDelayedExpansionStart + 1) return true;
+      cmdDelayedExpansionStart = index;
     }
     if (quote === "'") {
       delayedExpansionState = 0;
@@ -1298,7 +1307,7 @@ function evaluatePolicy(
           rule.action !== "allow" &&
           (rule.scope === "shell" || rule.scope === "tool_call"),
       )) &&
-    hasDynamicShellExecution(input.resource);
+    hasDynamicShellExecution(input.resource, input.toolName);
   const matchedRule = policy.rules.find((rule) => {
         if (
           (input.scope === "tool_call" && rule.scope !== "tool_call") ||
@@ -1581,7 +1590,11 @@ function nativePolicyInput(
   cwd?: string,
 ): ShellPolicyInput | ToolCallPolicyInput {
   const stableArgs = stableJson(args);
-  if (!["bash", "shell", "powershell", "sh"].includes(toolName.toLowerCase())) {
+  if (
+    !["bash", "cmd", "powershell", "pwsh", "sh", "shell"].includes(
+      normalizedCommandName(toolName),
+    )
+  ) {
     return {
       scope: "tool_call",
       resource: `${toolName} ${stableArgs}`,

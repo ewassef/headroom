@@ -219,6 +219,9 @@ describe("Headroom OpenCode transport", () => {
     for (const command of [`echo !A'B'!`, 'echo !A"B"!', "echo !A\\-B!"]) {
       expect(evaluateNativeToolPolicy(policy, "bash", { command }).action).toBe("allow");
     }
+    expect(
+      evaluateNativeToolPolicy(policy, "cmd.exe", { command: "echo !A'B'!" }).action,
+    ).toBe("deny");
   });
 
   it("bounds remote policy refresh configuration", () => {
