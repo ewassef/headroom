@@ -1050,6 +1050,20 @@ const DYNAMIC_COMMANDS = new Set([
   "while",
 ]);
 
+function hasPercentExpansionAt(commandLine: string, index: number): boolean {
+  const closing = commandLine.indexOf("%", index + 1);
+  if (closing <= index + 1) return false;
+  const lineBreak = commandLine.indexOf("\n", index + 1);
+  const carriageReturn = commandLine.indexOf("\r", index + 1);
+  const firstBreak =
+    lineBreak === -1
+      ? carriageReturn
+      : carriageReturn === -1
+        ? lineBreak
+        : Math.min(lineBreak, carriageReturn);
+  return firstBreak === -1 || closing < firstBreak;
+}
+
 function hasDynamicShellExecution(commandLine: string): boolean {
   let quote: "'" | '"' | "" = "";
   let visible = "";
@@ -1080,7 +1094,7 @@ function hasDynamicShellExecution(commandLine: string): boolean {
     if (
       char === "`" ||
       char === "$" ||
-      (char === "%" && /[^%\r\n]+%/.test(commandLine.slice(index))) ||
+      (char === "%" && hasPercentExpansionAt(commandLine, index)) ||
       (char === "!" && /^![A-Za-z_][A-Za-z0-9_]*!/.test(commandLine.slice(index)))
     ) {
       return true;
