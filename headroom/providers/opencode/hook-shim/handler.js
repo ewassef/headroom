@@ -738,6 +738,14 @@ var DYNAMIC_COMMANDS = /* @__PURE__ */ new Set([
   "until",
   "while"
 ]);
+function hasPercentExpansionAt(commandLine, index) {
+  const closing = commandLine.indexOf("%", index + 1);
+  if (closing <= index + 1) return false;
+  const lineBreak = commandLine.indexOf("\n", index + 1);
+  const carriageReturn = commandLine.indexOf("\r", index + 1);
+  const firstBreak = lineBreak === -1 ? carriageReturn : carriageReturn === -1 ? lineBreak : Math.min(lineBreak, carriageReturn);
+  return firstBreak === -1 || closing < firstBreak;
+}
 function hasDynamicShellExecution(commandLine) {
   let quote = "";
   let visible = "";
@@ -765,7 +773,7 @@ function hasDynamicShellExecution(commandLine) {
       index += 1;
       continue;
     }
-    if (char === "`" || char === "$" || char === "%" && /[^%\r\n]+%/.test(commandLine.slice(index)) || char === "!" && /^![A-Za-z_][A-Za-z0-9_]*!/.test(commandLine.slice(index))) {
+    if (char === "`" || char === "$" || char === "%" && hasPercentExpansionAt(commandLine, index) || char === "!" && /^![A-Za-z_][A-Za-z0-9_]*!/.test(commandLine.slice(index))) {
       return true;
     }
     visible += quote ? " " : char;
