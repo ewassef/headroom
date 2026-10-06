@@ -13221,19 +13221,17 @@ var DYNAMIC_COMMANDS = /* @__PURE__ */ new Set([
   "until",
   "while"
 ]);
-function hasPercentExpansionAt(commandLine, index) {
-  const closing = commandLine.indexOf("%", index + 1);
-  if (closing <= index + 1) return false;
-  const lineBreak = commandLine.indexOf("\n", index + 1);
-  const carriageReturn = commandLine.indexOf("\r", index + 1);
-  const firstBreak = lineBreak === -1 ? carriageReturn : carriageReturn === -1 ? lineBreak : Math.min(lineBreak, carriageReturn);
-  return firstBreak === -1 || closing < firstBreak;
-}
 function hasDynamicShellExecution(commandLine) {
   let quote = "";
+  let delayedExpansionState = 0;
+  let percentStart = -1;
   let visible = "";
   for (let index = 0; index < commandLine.length; index += 1) {
     const char = commandLine[index];
+    if (char === "\r" || char === "\n") {
+      delayedExpansionState = 0;
+      percentStart = -1;
+    }
     if (quote === "'") {
       visible += " ";
       if (char === "'") quote = "";
@@ -13256,9 +13254,19 @@ function hasDynamicShellExecution(commandLine) {
       index += 1;
       continue;
     }
-    if (char === "`" || char === "$" || char === "%" && hasPercentExpansionAt(commandLine, index) || char === "!" && /^![A-Za-z_][A-Za-z0-9_]*!/.test(commandLine.slice(index))) {
-      return true;
+    if (char === "%") {
+      if (percentStart >= 0 && index > percentStart + 1) return true;
+      percentStart = index;
     }
+    if (char === "!") {
+      if (delayedExpansionState === 2) return true;
+      delayedExpansionState = 1;
+    } else if (delayedExpansionState === 1) {
+      delayedExpansionState = /[A-Za-z_]/.test(char) ? 2 : 0;
+    } else if (delayedExpansionState === 2 && !/[A-Za-z0-9_]/.test(char)) {
+      delayedExpansionState = 0;
+    }
+    if (char === "`" || char === "$") return true;
     visible += quote ? " " : char;
   }
   if (quote) return true;

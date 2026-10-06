@@ -185,21 +185,36 @@ describe("Headroom OpenCode transport", () => {
     }
   });
 
-  it("handles long unmatched percent input without changing expansion semantics", () => {
+  it("handles long malformed percent input in one pass without changing expansion semantics", () => {
     const policy: HeadroomToolPolicyConfig = {
       defaultAction: "deny",
       rules: [{ id: "allow-echo", scope: "shell", action: "allow", command: "echo" }],
     };
-    const command = `echo %${"a".repeat(256_000)}`;
+    const percentCases = [
+      [`echo %${"a".repeat(256_000)}`, "allow"],
+      [`echo ${"%\n".repeat(512_000)}`, "deny"],
+      [`echo ${"%\r".repeat(512_000)}`, "deny"],
+    ];
     const started = performance.now();
 
-    expect(evaluateNativeToolPolicy(policy, "bash", { command }).action).toBe("allow");
-    expect(performance.now() - started).toBeLessThan(1_000);
+    for (const [command, action] of percentCases) {
+      expect(evaluateNativeToolPolicy(policy, "bash", { command }).action).toBe(action);
+    }
+    expect(performance.now() - started).toBeLessThan(4_000);
+    for (const command of [`echo ${"!\n".repeat(16_000)}`, `echo ${"!\r".repeat(16_000)}`]) {
+      expect(evaluateNativeToolPolicy(policy, "bash", { command }).action).toBe("deny");
+    }
     expect(
       evaluateNativeToolPolicy(policy, "bash", { command: "echo %PATH%" }).action,
     ).toBe("deny");
     expect(
       evaluateNativeToolPolicy(policy, "bash", { command: "echo '%PATH%'" }).action,
+    ).toBe("allow");
+    expect(
+      evaluateNativeToolPolicy(policy, "bash", { command: "echo !PATH!" }).action,
+    ).toBe("deny");
+    expect(
+      evaluateNativeToolPolicy(policy, "bash", { command: "echo '!PATH!'" }).action,
     ).toBe("allow");
   });
 
