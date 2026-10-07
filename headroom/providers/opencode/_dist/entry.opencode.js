@@ -12435,8 +12435,13 @@ var _proxyUrlCache = null;
 function getDefaultProxyUrl() {
   return _proxyUrlCache ?? process.env.HEADROOM_BASE_URL ?? "http://localhost:8787";
 }
+function trimTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end--;
+  return value.slice(0, end);
+}
 function createHeadroomRetrieveTool(config2) {
-  const origin = config2.proxyBaseUrl.replace(/\/+$/, "");
+  const origin = trimTrailingSlashes(config2.proxyBaseUrl);
   return {
     name: "headroom_retrieve",
     description: "Retrieve original uncompressed content from Headroom's compression store. Use when compressed context mentions a hash and you need the full details. Pass the hash from the compression marker (24 hex characters). Retrieval is by hash and always returns the full original content.",
@@ -14159,7 +14164,7 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 function normalizeProxyUrl2(url2) {
-  return url2.replace(/\/+$/, "");
+  return trimTrailingSlashes(url2);
 }
 function retiredCallFingerprint(key) {
   return createHash2("sha256").update(key).digest("hex").slice(0, 32);

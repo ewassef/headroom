@@ -4,7 +4,11 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 
-import { createHeadroomRetrieveTool, getDefaultProxyUrl } from "./retrieve.js";
+import {
+  createHeadroomRetrieveTool,
+  getDefaultProxyUrl,
+  trimTrailingSlashes,
+} from "./retrieve.js";
 import type { HeadroomToolPolicyConfig } from "./transport.js";
 import {
   acknowledgeNativeToolExecution,
@@ -48,7 +52,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 }
 
 function normalizeProxyUrl(url: string): string {
-  return url.replace(/\/+$/, "");
+  return trimTrailingSlashes(url);
 }
 
 function retiredCallFingerprint(key: string): string {
