@@ -20354,6 +20354,19 @@ function withExcludeHostsEnv(env, excludeHosts) {
     delete env[EXCLUDE_HOSTS_ENV];
   }
 }
+var PROCESS_ENV_KEYS = [PROXY_ENV, EXCLUDE_HOSTS_ENV, "NODE_OPTIONS"];
+function snapshotProcessEnv() {
+  return Object.fromEntries(PROCESS_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+function restoreProcessEnv(saved) {
+  for (const key of PROCESS_ENV_KEYS) {
+    if (saved[key] === void 0) {
+      delete process.env[key];
+    } else {
+      process.env[key] = saved[key];
+    }
+  }
+}
 function installProcessEnv(proxyUrl, excludeHosts, toolPolicy) {
   process.env[PROXY_ENV] = proxyUrl;
   withExcludeHostsEnv(process.env, excludeHosts);
@@ -21447,7 +21460,8 @@ function installHeadroomTransport(options) {
     originalChildSpawn: childProcess.spawn,
     originalChildExec: childProcess.exec,
     originalChildExecFile: childProcess.execFile,
-    originalChildFork: childProcess.fork
+    originalChildFork: childProcess.fork,
+    originalEnv: snapshotProcessEnv()
   };
   setState(state);
   installProcessEnv(options.proxyUrl, excludeHosts, toolPolicy);
@@ -21505,6 +21519,7 @@ function uninstallHeadroomTransport() {
   childProcess.exec = state.originalChildExec;
   childProcess.execFile = state.originalChildExecFile;
   childProcess.fork = state.originalChildFork;
+  restoreProcessEnv(state.originalEnv);
   syncBuiltinESMExports();
   if (state.previousNodeOptions === void 0) {
     delete process.env.NODE_OPTIONS;

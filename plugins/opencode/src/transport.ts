@@ -132,6 +132,7 @@ interface TransportState {
   originalChildExec: ChildExec;
   originalChildExecFile: ChildExecFile;
   originalChildFork: ChildFork;
+  originalEnv: Record<string, string | undefined>;
 }
 
 interface GlobalWithHeadroomTransport {
@@ -871,6 +872,23 @@ function withExcludeHostsEnv(env: NodeJS.ProcessEnv, excludeHosts: string[]): vo
     env[EXCLUDE_HOSTS_ENV] = excludeHosts.join(",");
   } else {
     delete env[EXCLUDE_HOSTS_ENV];
+  }
+}
+
+// installProcessEnv writes these process-wide keys; uninstall puts them back.
+const PROCESS_ENV_KEYS = [PROXY_ENV, EXCLUDE_HOSTS_ENV, "NODE_OPTIONS"] as const;
+
+function snapshotProcessEnv(): Record<string, string | undefined> {
+  return Object.fromEntries(PROCESS_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+
+function restoreProcessEnv(saved: Record<string, string | undefined>): void {
+  for (const key of PROCESS_ENV_KEYS) {
+    if (saved[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = saved[key];
+    }
   }
 }
 
@@ -2230,6 +2248,7 @@ export function installHeadroomTransport(options: InstallOptions): () => void {
     originalChildExec: childProcess.exec,
     originalChildExecFile: childProcess.execFile,
     originalChildFork: childProcess.fork,
+    originalEnv: snapshotProcessEnv(),
   };
 
   setState(state);
@@ -2293,6 +2312,7 @@ export function uninstallHeadroomTransport(): void {
   childProcess.exec = state.originalChildExec;
   childProcess.execFile = state.originalChildExecFile;
   childProcess.fork = state.originalChildFork;
+  restoreProcessEnv(state.originalEnv);
   syncBuiltinESMExports();
   if (state.previousNodeOptions === undefined) {
     delete process.env.NODE_OPTIONS;
